@@ -51,6 +51,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
+      - name: Frontend Type Check and Offline Tests
+        run: |
+          cd frontend
+          yarn install --frozen-lockfile
+          yarn type-check
+          yarn vitest run tests/cashMovement.spec.ts tests/offlineCashMovements.spec.ts tests/loaderPathNormalization.spec.ts tests/offlineKeyMapParity.spec.ts
+
       - name: Install Frappe Bench CLI
         run: |
           pip3 install --upgrade pip

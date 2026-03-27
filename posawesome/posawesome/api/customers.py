@@ -55,6 +55,34 @@ def get_customer_group_condition(pos_profile):
 
 
 @frappe.whitelist()
+def get_customer_balance(customer):
+    if not customer:
+        return {"balance": 0, "customer_name": None}
+
+    try:
+        customer_doc = frappe.get_doc("Customer", customer)
+        customer_name = customer_doc.customer_name
+
+        balance = frappe.db.sql(
+            """
+            SELECT SUM(debit - credit) AS balance
+            FROM `tabGL Entry`
+            WHERE party_type = 'Customer' AND party = %s AND docstatus = 1
+        """,
+            (customer,),
+            as_dict=True,
+        )
+
+        return {
+            "balance": flt(balance[0].get("balance", 0)) if balance else 0,
+            "customer_name": customer_name,
+        }
+    except Exception as e:
+        frappe.log_error(f"Error fetching customer balance: {e}")
+        return {"balance": 0, "customer_name": None}
+
+
+@frappe.whitelist()
 def get_customer_names(pos_profile, limit=None, offset=None, start_after=None, modified_after=None):
     _pos_profile = json.loads(pos_profile)
     ttl = _pos_profile.get("posa_server_cache_duration")
@@ -117,7 +145,11 @@ def get_customers_count(pos_profile):
 
 
 @frappe.whitelist()
-def get_customer_info(customer):
+def get_customer_info(customer=None):
+    customer = cstr(customer or "").strip()
+    if not customer:
+        return {}
+
     customer = frappe.get_doc("Customer", customer)
 
     res = {"loyalty_points": None, "conversion_factor": None}
@@ -139,6 +171,17 @@ def get_customer_info(customer):
     res["customer_group_price_list"] = frappe.get_value(
         "Customer Group", customer.customer_group, "default_price_list"
     )
+
+    effective_price_list = (
+        res.get("customer_price_list")
+        or res.get("customer_group_price_list")
+    )
+    if effective_price_list:
+        res["price_list_currency"] = frappe.get_value(
+            "Price List", effective_price_list, "currency"
+        )
+    else:
+        res["price_list_currency"] = None
 
     if customer.loyalty_program:
         lp_details = get_loyalty_program_details_with_points(
@@ -405,5 +448,5 @@ def make_address(args):
 
 
 @frappe.whitelist()
-def get_sales_person_names():
-    return fetch_sales_person_names()
+def get_sales_person_names(pos_profile=None):
+    return fetch_sales_person_names(pos_profile=pos_profile)

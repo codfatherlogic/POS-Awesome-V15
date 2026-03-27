@@ -25,24 +25,26 @@
  ],
  "fields": [
   {
+   "description": "Positions are 1-indexed and counted on the full barcode. Example: 3310100010009 => prefix 331, item code 3310100, weight 1.000, check digit 9.",
    "fieldname": "barcode_settings_section",
    "fieldtype": "Section Break",
    "label": "Barcode Structure"
   },
   {
    "default": "0",
+   "description": "Enable when your barcode starts with a fixed prefix value (for example, 331).",
    "fieldname": "prefix_included_or_not",
    "fieldtype": "Check",
    "label": "Prefix included in barcode"
   },
   {
-   "description": "Number of characters to skip when a prefix is present.",
+   "description": "Prefix length (for example, prefix 331 => length 3). Item/weight start positions still use full barcode positions.",
    "fieldname": "no_of_prefix_characters",
    "fieldtype": "Int",
    "label": "Prefix length"
   },
   {
-   "description": "Optional prefix value that all scale barcodes start with.",
+   "description": "Fixed starting value of all scale barcodes (for example, 331). If set, barcodes not starting with this value are ignored.",
    "fieldname": "prefix",
    "fieldtype": "Data",
    "label": "Prefix"
@@ -52,36 +54,37 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Starting position (1-indexed) of the item code within the barcode.",
+   "description": "1-indexed start position of item code in the full barcode. Example: for item code 3310100 in 3310100010009, start is 1.",
    "fieldname": "item_code_starting_digit",
    "fieldtype": "Int",
    "label": "Item code starting position"
   },
   {
-   "description": "Total number of digits used for the item code in the barcode.",
+   "description": "Total item code digits to extract. Example: item code 3310100 => digits 7.",
    "fieldname": "item_code_total_digits",
    "fieldtype": "Int",
    "label": "Item code digits"
   },
   {
+   "description": "Weight value is parsed as: [weight digits].[weight decimals].",
    "fieldname": "section_break_weight",
    "fieldtype": "Section Break",
    "label": "Weight"
   },
   {
-   "description": "Starting position (1-indexed) of the weight segment.",
+   "description": "1-indexed start position of weight segment. Example: in 3310100010009, weight starts at position 8.",
    "fieldname": "weight_starting_digit",
    "fieldtype": "Int",
    "label": "Weight starting position"
   },
   {
-   "description": "Number of digits representing the weight before decimal places.",
+   "description": "Digits before decimal. Example: for 1.000, use 1 (or 2 if your scale encodes 01.000).",
    "fieldname": "weight_total_digits",
    "fieldtype": "Int",
    "label": "Weight digits"
   },
   {
-   "description": "Number of decimal places encoded for the weight.",
+   "description": "Digits after decimal. Example: 1.000 => decimals 3.",
    "fieldname": "weight_decimals",
    "fieldtype": "Int",
    "label": "Weight decimals"
@@ -91,12 +94,14 @@
    "fieldtype": "Column Break"
   },
   {
+   "description": "Enable only if barcode also contains price segment.",
    "fieldname": "section_break_price",
    "fieldtype": "Section Break",
    "label": "Price"
   },
   {
    "default": "0",
+   "description": "When enabled, price is extracted using the price start/digits/decimals fields below.",
    "fieldname": "price_included_in_barcode_or_not",
    "fieldtype": "Check",
    "label": "Price included in barcode"

@@ -73,6 +73,14 @@ doctype_js = {
 # after_install = "posawesome.install.after_install"
 # before_uninstall = "posawesome.uninstall.before_uninstall"
 after_uninstall = "posawesome.uninstall.after_uninstall"
+after_migrate = [
+    "posawesome.patches.add_pos_cash_movement_settings.execute",
+    "posawesome.patches.add_cash_movement_to_workspace.execute",
+    "posawesome.patches.add_customer_display_settings.execute",
+    "posawesome.patches.add_dashboard_settings.execute",
+    "posawesome.patches.add_dashboard_global_settings.execute",
+    "posawesome.patches.reorganize_pos_profile_sections.execute",
+]
 
 # Desk Notifications
 # ------------------
@@ -110,6 +118,10 @@ doc_events = {
     "Customer": {
         "validate": "posawesome.posawesome.api.customer.validate",
         "after_insert": "posawesome.posawesome.api.customer.after_insert",
+    },
+    "Bin": {
+        "after_insert": "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
+        "on_update": "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
     },
 }
 
@@ -175,6 +187,12 @@ fixtures = [
                     "POS Invoice-posa_pos_opening_shift",
                     "Item Barcode-posa_uom",
                     "POS Profile-posa_pos_awesome_settings",
+                    "POS Profile-posa_section_pricing_controls",
+                    "POS Profile-posa_section_sales_returns",
+                    "POS Profile-posa_section_sales_purchase",
+                    "POS Profile-posa_section_inventory_controls",
+                    "POS Profile-posa_section_print_delivery",
+                    "POS Profile-posa_section_cash_movement",
                     "POS Profile-posa_allow_delete",
                     "POS Profile-posa_allow_user_to_edit_rate",
                     "POS Profile-posa_allow_user_to_edit_additional_discount",
@@ -258,6 +276,10 @@ fixtures = [
                     "POS Profile-posa_tax_inclusive",
                     "POS Profile-posa_use_percentage_discount",
                     "POS Profile-posa_allow_customer_purchase_order",
+                    "POS Profile-posa_allow_purchase_order",
+                    "POS Profile-posa_allow_purchase_receipt",
+                    "POS Profile-posa_allow_create_purchase_items",
+                    "POS Profile-posa_allow_create_purchase_suppliers",
                     "POS Profile-posa_allow_print_last_invoice",
                     "POS Profile-posa_display_additional_notes",
                     "POS Profile-posa_display_authorization_code",
@@ -298,8 +320,29 @@ fixtures = [
                     "POS Profile-posa_language",
                     "POS Profile-posa_enable_return_validity",
                     "POS Profile-posa_return_validity_days",
+                    "POS Profile-posa_enable_cash_movement",
+                    "POS Profile-posa_allow_pos_expense",
+                    "POS Profile-posa_allow_cash_deposit",
+                    "POS Profile-posa_default_expense_account",
+                    "POS Profile-posa_allowed_expense_accounts",
+                    "POS Profile-posa_default_source_account",
+                    "POS Profile-posa_allow_source_account_override",
+                    "POS Profile-posa_allowed_source_accounts",
+                    "POS Profile-posa_back_office_cash_account",
+                    "POS Profile-posa_allow_cancel_submitted_cash_movement",
+                    "POS Profile-posa_allow_delete_cancelled_cash_movement",
+                    "POS Profile-posa_require_cash_movement_remarks",
+                    "POS Profile-posa_cash_movement_max_amount",
+                    "POS Profile-posa_section_awesome_dashboard",
+                    "POS Profile-posa_enable_awesome_dashboard",
+                    "POS Profile-posa_allow_company_dashboard_scope",
+                    "POS Profile-posa_low_stock_alert_threshold",
                     "POS Settings-posa_enable_return_validity",
                     "POS Settings-posa_return_validity_days",
+                    "POS Settings-posa_section_dashboard",
+                    "POS Settings-posa_enable_awesome_dashboard_global",
+                    "POS Settings-posa_dashboard_default_scope",
+                    "POS Settings-posa_dashboard_low_stock_alert_threshold",
                     "POS Invoice-posa_return_valid_upto",
                     "Sales Invoice-posa_return_valid_upto",
                 ),

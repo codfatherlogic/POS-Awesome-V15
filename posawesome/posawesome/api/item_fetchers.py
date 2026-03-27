@@ -85,7 +85,6 @@ def _fetch_item_prices(
                 price_list = %(price_list)s
                 AND item_code IN %(item_codes)s
                 AND currency = %(currency)s
-                AND selling = 1
                 AND (valid_from IS NULL OR valid_from <= %(today)s)
                 AND IFNULL(customer, '') IN ('', %(customer)s)
                 AND (valid_upto IS NULL OR valid_upto = '' OR valid_upto >= %(today)s)
@@ -151,7 +150,7 @@ def _fetch_item_meta(item_codes: Tuple[str, ...]):
         return []
     return frappe.get_all(
         "Item",
-        fields=["name", "item_name", "has_batch_no", "has_serial_no", "stock_uom", "allow_negative_stock"],
+        fields=["name", "item_name", "has_batch_no", "has_serial_no", "stock_uom", "allow_negative_stock", "purchase_uom"],
         filters={"name": ["in", item_codes]},
     )
 
@@ -409,16 +408,26 @@ def merge_item_row(
     )
     price_currency = price_row.get("currency") if price_row else None
 
+    batch_rows = lookup_data.batch_map.get(item_code, [])
+    actual_qty = lookup_data.stock_map.get(item_code, 0) or 0
+    if meta.get("has_batch_no") and batch_rows:
+        actual_qty = sum(
+            flt(batch.get("batch_qty"))
+            for batch in batch_rows
+            if not batch.get("is_expired")
+        )
+
     row = dict(item)
     row.update(
         {
             "item_uoms": uoms,
             "item_barcode": lookup_data.barcode_map.get(item_code, []),
-            "actual_qty": lookup_data.stock_map.get(item_code, 0) or 0,
+            "actual_qty": actual_qty,
             "has_batch_no": meta.get("has_batch_no"),
             "has_serial_no": meta.get("has_serial_no"),
             "allow_negative_stock": meta.get("allow_negative_stock"),
-            "batch_no_data": lookup_data.batch_map.get(item_code, []),
+            "purchase_uom": meta.get("purchase_uom"),
+            "batch_no_data": batch_rows,
             "serial_no_data": lookup_data.serial_map.get(item_code, []),
             "rate": price_row.get("price_list_rate") if price_row else 0,
             "price_list_rate": price_row.get("price_list_rate") if price_row else 0,
@@ -572,6 +581,8 @@ class ItemDetailAggregator:
         batch_map: Dict[str, List[Dict[str, object]]] = {}
         for row in batch_rows:
             is_expired = bool(row.expiry_date and str(row.expiry_date) <= str(self.today))
+            if is_expired:
+                continue
             batch_map.setdefault(row.item_code, []).append(
                 {
                     "batch_no": row.batch_no,

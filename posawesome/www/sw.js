@@ -5,7 +5,7 @@ const MAX_CACHE_ITEMS = 1000;
 
 const PRECACHE_URLS = [
 	"/app/posapp",
-	"/assets/posawesome/dist/js/posawesome.umd.js",
+	"/assets/posawesome/dist/js/posawesome.js",
 	"/assets/posawesome/dist/js/offline/index.js",
 	"/assets/posawesome/dist/js/posapp/workers/itemWorker.js",
 	"/assets/posawesome/dist/js/libs/dexie.min.js",
@@ -16,6 +16,29 @@ const PRECACHE_URLS = [
 let cachedCacheName = null;
 let cacheNameInFlight = null;
 let currentVersion = null;
+
+async function precacheUrls(cacheName) {
+	const cache = await caches.open(cacheName);
+	await Promise.all(
+		PRECACHE_URLS.map(async (url) => {
+			try {
+				const resp = await fetch(url);
+				if (resp && resp.ok) {
+					await cache.put(url, resp.clone());
+				}
+			} catch (err) {
+				console.warn("SW install failed to fetch", url, err);
+			}
+		}),
+	);
+	await enforceCacheLimit(cache);
+	return cache;
+}
+
+async function cleanupObsoleteCaches(activeCacheName) {
+	const keys = await caches.keys();
+	await Promise.all(keys.filter((key) => key !== activeCacheName).map((key) => caches.delete(key)));
+}
 
 function postVersionMessage(target) {
 	if (!currentVersion) return;
@@ -42,10 +65,28 @@ self.addEventListener("message", (event) => {
 	}
 	if (payload.type === "SKIP_WAITING") {
 		self.skipWaiting();
+		return;
+	}
+	if (payload.type === "REFRESH_CACHE_VERSION") {
+		const target = (event.ports && event.ports[0]) || event.source || null;
+		const task = refreshCacheVersion(target);
+		if (typeof event.waitUntil === "function") {
+			event.waitUntil(task);
+		}
+		return;
+	}
+	if (payload.type === "CLIENT_FORCE_UNREGISTER") {
+		const task = forceUnregisterServiceWorker();
+		if (typeof event.waitUntil === "function") {
+			event.waitUntil(task);
+		}
 	}
 });
 
-async function resolveCacheVersion() {
+async function resolveCacheVersion(forceRefresh = false) {
+	if (forceRefresh) {
+		currentVersion = null;
+	}
 	try {
 		const response = await fetch(VERSION_URL, { cache: "no-store" });
 		if (response && response.ok) {
@@ -62,7 +103,11 @@ async function resolveCacheVersion() {
 	return DEFAULT_CACHE_VERSION;
 }
 
-async function getCacheName() {
+async function getCacheName(forceRefresh = false) {
+	if (forceRefresh) {
+		cachedCacheName = null;
+		cacheNameInFlight = null;
+	}
 	if (cachedCacheName) {
 		return cachedCacheName;
 	}
@@ -70,7 +115,7 @@ async function getCacheName() {
 		return cacheNameInFlight;
 	}
 	cacheNameInFlight = (async () => {
-		const version = await resolveCacheVersion();
+		const version = await resolveCacheVersion(forceRefresh);
 		const name = `${CACHE_PREFIX}${version}`;
 		if (version !== DEFAULT_CACHE_VERSION) {
 			cachedCacheName = name;
@@ -91,25 +136,34 @@ async function enforceCacheLimit(cache) {
 	}
 }
 
+async function refreshCacheVersion(target) {
+	const activeCacheName = await getCacheName(true);
+	await precacheUrls(activeCacheName);
+	await cleanupObsoleteCaches(activeCacheName);
+	postVersionMessage(target);
+	const clients = await self.clients.matchAll({
+		type: "window",
+		includeUncontrolled: true,
+	});
+	clients.forEach(postVersionMessage);
+	return activeCacheName;
+}
+
+async function forceUnregisterServiceWorker() {
+	cachedCacheName = null;
+	cacheNameInFlight = null;
+	currentVersion = null;
+	const keys = await caches.keys();
+	await Promise.all(keys.map((key) => caches.delete(key)));
+	await self.registration.unregister();
+}
+
 self.addEventListener("install", (event) => {
 	self.skipWaiting();
 	event.waitUntil(
 		(async () => {
 			const cacheName = await getCacheName();
-			const cache = await caches.open(cacheName);
-			await Promise.all(
-				PRECACHE_URLS.map(async (url) => {
-					try {
-						const resp = await fetch(url);
-						if (resp && resp.ok) {
-							await cache.put(url, resp.clone());
-						}
-					} catch (err) {
-						console.warn("SW install failed to fetch", url, err);
-					}
-				}),
-			);
-			await enforceCacheLimit(cache);
+			await precacheUrls(cacheName);
 		})(),
 	);
 });
@@ -118,8 +172,7 @@ self.addEventListener("activate", (event) => {
 	event.waitUntil(
 		(async () => {
 			const activeCacheName = await getCacheName();
-			const keys = await caches.keys();
-			await Promise.all(keys.filter((key) => key !== activeCacheName).map((key) => caches.delete(key)));
+			await cleanupObsoleteCaches(activeCacheName);
 			const cache = await caches.open(activeCacheName);
 			await enforceCacheLimit(cache);
 			await self.clients.claim();

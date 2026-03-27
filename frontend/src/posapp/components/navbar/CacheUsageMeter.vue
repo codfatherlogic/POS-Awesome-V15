@@ -79,63 +79,75 @@
 	</div>
 </template>
 
-<script>
-export default {
+<script setup lang="ts">
+import { computed } from "vue";
+
+defineOptions({
 	name: "CacheUsageMeter",
-	props: {
-		cacheUsage: {
-			type: Number,
-			default: 0,
-		},
-		cacheUsageLoading: {
-			type: Boolean,
-			default: false,
-		},
-		cacheUsageDetails: {
-			type: Object,
-			default: () => ({
-				total: 0,
-				indexedDB: 0,
-				localStorage: 0,
-			}),
-		},
-	},
-	computed: {
-		cacheUsageColor() {
-			// Return color based on cache usage percentage
-			if (this.cacheUsage < 50) return "success";
-			if (this.cacheUsage < 80) return "warning";
-			return "error";
-		},
-		cacheBarGradient() {
-			if (this.cacheUsage < 50) {
-				return "linear-gradient(90deg, #43e97b 0%, #38f9d7 100%)";
-			} else if (this.cacheUsage < 80) {
-				return "linear-gradient(90deg, #f7971e 0%, #ffd200 100%)";
-			} else {
-				return "linear-gradient(90deg, #f953c6 0%, #b91d73 100%)";
-			}
-		},
-		cacheUsageLabel() {
-			return `${this.cacheUsage}% ${this.__("cache used")}`;
-		},
-	},
-	methods: {
-		refreshCacheUsage() {
-			if (this.cacheUsageLoading) {
-				return;
-			}
-			this.$emit("refresh");
-		},
-		formatBytes(bytes) {
-			if (bytes === 0) return "0 Bytes";
-			const k = 1024;
-			const sizes = ["Bytes", "KB", "MB", "GB"];
-			const i = Math.floor(Math.log(bytes) / Math.log(k));
-			return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-		},
-	},
-};
+});
+
+interface CacheUsageDetails {
+	total: number;
+	indexedDB: number;
+	localStorage: number;
+}
+
+interface Props {
+	cacheUsage?: number;
+	cacheUsageLoading?: boolean;
+	cacheUsageDetails?: CacheUsageDetails;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+	cacheUsage: 0,
+	cacheUsageLoading: false,
+	cacheUsageDetails: () => ({
+		total: 0,
+		indexedDB: 0,
+		localStorage: 0,
+	}),
+});
+
+const emit = defineEmits<{
+	refresh: [];
+}>();
+
+// @ts-ignore
+const __ = (window as any).__ || ((text: string) => text);
+
+const cacheUsageColor = computed(() => {
+	// Return color based on cache usage percentage
+	if (props.cacheUsage < 50) return "success";
+	if (props.cacheUsage < 80) return "warning";
+	return "error";
+});
+
+const cacheBarGradient = computed(() => {
+	if (props.cacheUsage < 50) {
+		return "linear-gradient(90deg, #43e97b 0%, #38f9d7 100%)";
+	}
+	if (props.cacheUsage < 80) {
+		return "linear-gradient(90deg, #f7971e 0%, #ffd200 100%)";
+	}
+	return "linear-gradient(90deg, #f953c6 0%, #b91d73 100%)";
+});
+
+const cacheUsageLabel = computed(() => `${props.cacheUsage}% ${__("cache used")}`);
+
+function refreshCacheUsage() {
+	if (props.cacheUsageLoading) {
+		return;
+	}
+	emit("refresh");
+}
+
+function formatBytes(bytes: number) {
+	if (bytes === 0) return "0 Bytes";
+	const k = 1024;
+	const sizes = ["Bytes", "KB", "MB", "GB"];
+	const i = Math.floor(Math.log(bytes) / Math.log(k));
+	return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+}
 </script>
 
 <style scoped>

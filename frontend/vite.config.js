@@ -42,22 +42,12 @@ export default defineConfig({
 					dest: "libs",
 				},
 				{
-					src: "src/offline/*",
-					dest: "offline",
+					src: "node_modules/jsbarcode/dist/JsBarcode.all.min.js",
+					dest: "libs",
 				},
 				{
-					src: "src/sw.js",
-					dest: "../www",
-					transform(contents) {
-						return contents.replace(/__BUILD_VERSION__/g, buildVersion);
-					},
-				},
-				{
-					src: "src/loader.js",
-					dest: ".",
-					transform(contents) {
-						return contents.replace(/__BUILD_VERSION__/g, buildVersion);
-					},
+					src: "node_modules/html2pdf.js/dist/html2pdf.bundle.min.js",
+					dest: "libs",
 				},
 			],
 		}),
@@ -69,12 +59,15 @@ export default defineConfig({
 	},
 	build: {
 		target: "esnext",
+		modulePreload: false,
 		outDir: "../posawesome/public/dist/js",
 		emptyOutDir: true,
 		cssCodeSplit: false,
 		rollupOptions: {
 			input: {
-				posawesome: path.resolve(__dirname, "src/posawesome.bundle.js"),
+				posawesome: path.resolve(__dirname, "src/posawesome.bundle.ts"),
+				"offline/index": path.resolve(__dirname, "src/offline/index.ts"),
+				loader: path.resolve(__dirname, "src/loader.ts"),
 			},
 			external: ["socket.io-client"],
 			output: {
@@ -108,5 +101,9 @@ export default defineConfig({
 		__BUILD_VERSION__: JSON.stringify(buildVersion),
 		"process.env.NODE_ENV": '"production"',
 		process: '{"env":{}}',
+	},
+	test: {
+		include: ["tests/**/*.spec.{js,ts}", "tests/**/*.test.{js,ts}"],
+		exclude: ["tests/smoke/**"],
 	},
 });

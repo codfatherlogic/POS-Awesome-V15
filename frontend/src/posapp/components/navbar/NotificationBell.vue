@@ -14,7 +14,7 @@
 						:model-value="unreadCount > 0"
 						:content="unreadCount"
 						color="error"
-						overlap
+						floating
 						v-if="notifications.length"
 					>
 						<v-icon class="pos-text-primary">mdi-bell-outline</v-icon>
@@ -26,7 +26,7 @@
 			<v-card class="pos-themed-card notification-card" elevation="12">
 				<div class="notification-card__header">
 					<div class="header-text">
-						<div class="title">{{ __("Notifications") }}</div>
+						<div class="notification-heading">{{ __("Notifications") }}</div>
 						<div class="subtitle">
 							{{
 								notifications.length
@@ -79,49 +79,62 @@
 	</div>
 </template>
 
-<script>
-export default {
+<script setup lang="ts">
+import { ref, toRefs, watch } from "vue";
+
+defineOptions({
 	name: "NotificationBell",
-	props: {
-		notifications: {
-			type: Array,
-			default: () => [],
-		},
-		unreadCount: {
-			type: Number,
-			default: 0,
-		},
-	},
-	data() {
-		return {
-			open: false,
-		};
-	},
-	watch: {
-		open(val) {
-			if (val) {
-				this.$emit("mark-read");
-			}
-		},
-	},
-	methods: {
-		clearAll() {
-			this.$emit("clear");
-		},
-		formatTimestamp(ts) {
-			if (!ts) {
-				return "";
-			}
-			try {
-				const date = new Date(ts);
-				return date.toLocaleString();
-			} catch {
-				return ts;
-			}
-		},
-	},
-	emits: ["mark-read", "clear"],
-};
+});
+
+interface NotificationItem {
+	id: string | number;
+	title: string;
+	detail?: string;
+	timestamp: string | number | Date;
+	color?: string;
+}
+
+interface Props {
+	notifications?: NotificationItem[];
+	unreadCount?: number;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+	notifications: () => [],
+	unreadCount: 0,
+});
+const { notifications, unreadCount } = toRefs(props);
+
+const emit = defineEmits<{
+	(_event: "mark-read"): void;
+	(_event: "clear"): void;
+}>();
+
+// @ts-ignore
+const __ = (window as any).__ || ((text: string) => text);
+const open = ref(false);
+
+watch(open, (value) => {
+	if (value) {
+		emit("mark-read");
+	}
+});
+
+function clearAll() {
+	emit("clear");
+}
+
+function formatTimestamp(ts: string | number | Date) {
+	if (!ts) {
+		return "";
+	}
+	try {
+		const date = new Date(ts);
+		return date.toLocaleString();
+	} catch {
+		return String(ts);
+	}
+}
 </script>
 
 <style scoped>
@@ -146,7 +159,7 @@ export default {
 	padding: 12px 16px;
 }
 
-.header-text .title {
+.header-text .notification-heading {
 	font-weight: 700;
 	font-size: 1rem;
 }

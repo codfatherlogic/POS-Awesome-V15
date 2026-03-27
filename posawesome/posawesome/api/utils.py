@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from functools import cache
 
 import frappe
@@ -55,6 +56,58 @@ def expand_item_groups(item_groups):
     return list(expanded_groups)
 
 
+def _ensure_pos_profile(pos_profile):
+    """Return a ``(profile_dict, profile_json)`` tuple for the given input.
+
+    The POS profile parameter can arrive as a JSON string, a python ``dict``,
+    a bare profile name or even ``None`` (when the frontend has not yet loaded
+    the active profile). This helper normalises those inputs so downstream code
+    can rely on a fully populated dictionary and a JSON serialised
+    representation of the same profile. If no valid profile can be resolved a
+    user-facing validation error is raised.
+    """
+    from frappe import _
+    from frappe import as_json
+
+    profile_dict = None
+    profile_json = None
+
+    if isinstance(pos_profile, dict):
+        profile_dict = pos_profile
+        profile_json = as_json(pos_profile)
+    elif isinstance(pos_profile, str):
+        raw_value = pos_profile.strip()
+        if raw_value:
+            try:
+                decoded_value = json.loads(raw_value)
+            except Exception:
+                decoded_value = raw_value
+
+            if isinstance(decoded_value, dict):
+                profile_dict = decoded_value
+                profile_json = raw_value
+            elif isinstance(decoded_value, str):
+                if decoded_value:
+                    profile_doc = frappe.get_doc("POS Profile", decoded_value)
+                    profile_dict = profile_doc.as_dict()
+                else:
+                    profile_dict = get_active_pos_profile()
+            elif decoded_value is None:
+                profile_dict = get_active_pos_profile()
+        else:
+            profile_dict = get_active_pos_profile()
+    elif pos_profile is None:
+        profile_dict = get_active_pos_profile()
+
+    if profile_dict and not profile_json:
+        profile_json = as_json(profile_dict)
+
+    if not profile_dict or not profile_json:
+        frappe.throw(_("POS profile data is missing or invalid."))
+
+    return profile_dict, profile_json
+
+
 @frappe.whitelist()
 def get_active_pos_profile(user=None):
     """Return the active POS profile for the given user."""
@@ -73,19 +126,42 @@ def get_default_warehouse(company=None):
     company = company or frappe.defaults.get_default("company")
     if not company:
         return None
-    warehouse = frappe.db.get_value("Company", company, "default_warehouse")
-    if not warehouse:
-        warehouse = frappe.db.get_single_value("Stock Settings", "default_warehouse")
+    warehouse = frappe.db.get_single_value("Stock Settings", "default_warehouse")
     return warehouse
 
 
-def fetch_sales_person_names():
+def _resolve_pos_profile_input(pos_profile=None):
+    """Return a POS profile dict from a name, JSON string, dict or fallback."""
+
+    if isinstance(pos_profile, dict):
+        return pos_profile
+
+    if isinstance(pos_profile, str):
+        raw_value = pos_profile.strip()
+        if not raw_value:
+            return None
+
+        try:
+            decoded_value = json.loads(raw_value)
+        except Exception:
+            decoded_value = raw_value
+
+        if isinstance(decoded_value, dict):
+            return decoded_value
+
+        if isinstance(decoded_value, str) and decoded_value:
+            return frappe.get_cached_doc("POS Profile", decoded_value).as_dict()
+
+    return None
+
+
+def fetch_sales_person_names(pos_profile=None):
     """Return the list of enabled sales persons allowed for the active POS profile."""
 
     logger.info("Fetching sales persons...")
 
     try:
-        profile = get_active_pos_profile()
+        profile = _resolve_pos_profile_input(pos_profile) or get_active_pos_profile()
         allowed = []
         if profile:
             allowed = [
@@ -95,13 +171,21 @@ def fetch_sales_person_names():
         filters = {"enabled": 1}
         if allowed:
             filters["name"] = ["in", allowed]
-
-        sales_persons = frappe.get_list(
-            "Sales Person",
-            filters=filters,
-            fields=["name", "sales_person_name"],
-            limit_page_length=100000,
-        )
+            sales_persons = frappe.get_all(
+                "Sales Person",
+                filters=filters,
+                fields=["name", "sales_person_name"],
+                limit_page_length=100000,
+                order_by="sales_person_name asc, name asc",
+            )
+        else:
+            sales_persons = frappe.get_list(
+                "Sales Person",
+                filters=filters,
+                fields=["name", "sales_person_name"],
+                limit_page_length=100000,
+                order_by="sales_person_name asc, name asc",
+            )
 
         logger.info(
             "Found %s sales persons: %s",
@@ -117,6 +201,24 @@ def fetch_sales_person_names():
             "POS Sales Person Error",
         )
         return []
+
+
+def is_perf_logging_enabled() -> bool:
+    """Return True when lightweight POS performance logging is enabled."""
+
+    return bool(frappe.conf.get("posa_perf_log_enabled"))
+
+
+def log_perf_event(event: str, started_at: float, **context):
+    """Emit a structured performance log line when enabled."""
+
+    if not is_perf_logging_enabled():
+        return
+
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    context_parts = [f"{key}={context[key]}" for key in sorted(context.keys())]
+    context_str = " ".join(context_parts)
+    logger.info("[POSA_PERF] event=%s elapsed_ms=%s %s", event, elapsed_ms, context_str)
 
 
 @cache

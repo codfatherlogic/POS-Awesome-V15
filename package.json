@@ -1,10 +1,10 @@
 {
   "name": "posawesome",
-  "version": "15.18.0",
+  "version": "15.25.0",
   "main": "electron/main.js",
   "scripts": {
     "dev": "cd frontend && yarn dev",
-    "build": "cd frontend && yarn build",
+    "build": "cd frontend && yarn install && yarn build",
     "electron:dev": "electron .",
     "electron:build": "electron-builder",
     "electron:build:linux": "electron-builder --linux",

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/posapp/utils/stockCoordinator.js", () => ({
+vi.mock("../src/posapp/utils/stockCoordinator.ts", () => ({
 	default: {
 		updateBaseQuantities: vi.fn(),
 		applyAvailabilityToItem: vi.fn(),
 	},
 }));
-vi.mock("../src/lib/pricingEngine.js", () => ({
+vi.mock("../src/lib/pricingEngine.ts", () => ({
 	applyLocalPricingRules: vi.fn(() => ({ rate: 0, discountPerUnit: 0, applied: [] })),
 	computeFreeItems: vi.fn(() => []),
 	evaluatePricingRules: vi.fn(() => ({
@@ -15,8 +15,8 @@ vi.mock("../src/lib/pricingEngine.js", () => ({
 	})),
 }));
 
-import invoiceItemMethods from "../src/posapp/components/pos/invoiceItemMethods.js";
-import { applyLocalPricingRules, computeFreeItems } from "../src/lib/pricingEngine.js";
+import invoiceItemMethods from "../src/posapp/components/pos/invoice/invoiceItemMethods.ts";
+import { applyLocalPricingRules, computeFreeItems } from "../src/lib/pricingEngine.ts";
 
 const createContext = () => ({
 	pos_profile: {

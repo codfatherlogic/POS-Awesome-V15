@@ -6,10 +6,12 @@ from __future__ import unicode_literals
 
 import frappe
 from frappe.utils import cstr, add_to_date, get_datetime
-from typing import List, Dict
+from typing import List, Dict, Any
 import time
 import os
 import re
+import json
+import subprocess
 
 try:
     import psutil
@@ -172,6 +174,198 @@ def get_app_info() -> Dict[str, List[Dict[str, str]]]:
     return {"apps": apps_info, "build_version": get_build_version()}
 
 
+def _get_git_commit_info(app_name: str = "posawesome") -> Dict[str, Any]:
+    """Best-effort git commit details for the given app."""
+    try:
+        app_path = frappe.get_app_path(app_name)
+    except Exception:
+        return {}
+
+    if not app_path or not os.path.exists(app_path):
+        return {}
+
+    def _run(cmd: List[str]) -> str:
+        return (
+            subprocess.check_output(cmd, cwd=app_path, stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+
+    try:
+        commit_hash = _run(["git", "rev-parse", "HEAD"])
+        commit_message = _run(["git", "log", "-1", "--pretty=%B"])
+        commit_date = _run(["git", "log", "-1", "--pretty=%cI"])
+        return {
+            "commit_hash": commit_hash,
+            "commit_message": commit_message,
+            "commit_date": commit_date,
+        }
+    except Exception:
+        return {}
+
+
+@frappe.whitelist()
+def get_build_info() -> Dict[str, Any]:
+    """Return build version + latest git commit info for update prompts."""
+    data: Dict[str, Any] = {"build_version": get_build_version()}
+    data.update(_get_git_commit_info("posawesome"))
+    return data
+
+
+def _fetch_remote(app_path: str) -> None:
+    try:
+        subprocess.check_output(
+            ["git", "fetch", "origin", "--prune", "--quiet"],
+            cwd=app_path,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return
+
+
+def _get_remote_heads(app_path: str) -> Dict[str, str]:
+    try:
+        output = (
+            subprocess.check_output(
+                ["git", "for-each-ref", "refs/remotes/origin", "--format=%(refname:short) %(objectname)"],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        heads = {}
+        for line in output.splitlines():
+            parts = line.strip().split(" ")
+            if len(parts) != 2:
+                continue
+            ref, sha = parts
+            if ref == "origin/HEAD":
+                continue
+            branch = ref.replace("origin/", "", 1)
+            heads[branch] = sha
+        return heads
+    except Exception:
+        return {}
+
+
+def _get_commit_details(app_path: str, ref: str) -> Dict[str, str]:
+    try:
+        commit_message = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%B", ref],
+            cwd=app_path,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").strip()
+        commit_date = subprocess.check_output(
+            ["git", "log", "-1", "--pretty=%cI", ref],
+            cwd=app_path,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").strip()
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", ref],
+            cwd=app_path,
+            stderr=subprocess.DEVNULL,
+        ).decode("utf-8").strip()
+        return {
+            "commit_hash": commit_hash,
+            "commit_message": commit_message,
+            "commit_date": commit_date,
+        }
+    except Exception:
+        return {}
+
+
+def _get_commit_list(app_path: str, range_ref: str, limit: int = 20) -> List[Dict[str, str]]:
+    try:
+        output = (
+            subprocess.check_output(
+                [
+                    "git",
+                    "log",
+                    range_ref,
+                    f"--max-count={limit}",
+                    "--pretty=%H%x1f%h%x1f%s%x1f%cI",
+                ],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        commits: List[Dict[str, str]] = []
+        for line in output.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 4:
+                continue
+            full_hash, short_hash, subject, commit_date = parts
+            commits.append(
+                {
+                    "commit_hash": full_hash,
+                    "commit_short": short_hash,
+                    "commit_message": subject,
+                    "commit_date": commit_date,
+                }
+            )
+        return commits
+    except Exception:
+        return []
+
+def _get_current_branch(app_path: str) -> str:
+    try:
+        branch = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        return branch
+    except Exception:
+        return ""
+
+
+@frappe.whitelist()
+def get_remote_update_info() -> Dict[str, Any]:
+    data: Dict[str, Any] = {"build_version": get_build_version()}
+    base = _get_git_commit_info("posawesome")
+    if base:
+        data.update(base)
+
+    try:
+        app_path = frappe.get_app_path("posawesome")
+    except Exception:
+        return data
+
+    if not app_path or not os.path.exists(app_path):
+        return data
+
+    _fetch_remote(app_path)
+    heads = _get_remote_heads(app_path)
+    data["remote_heads"] = heads
+    current_branch = _get_current_branch(app_path)
+    if current_branch:
+        data["current_branch"] = current_branch
+
+    current_hash = base.get("commit_hash") if base else None
+    if heads and current_hash and current_branch:
+        remote_head = heads.get(current_branch)
+        if remote_head and remote_head != current_hash:
+            different = {current_branch: remote_head}
+            data["remote_ahead"] = different
+            ref = f"origin/{current_branch}"
+            details = _get_commit_details(app_path, ref)
+            if details:
+                data["remote_sample_branch"] = current_branch
+                data["remote_sample"] = details
+            data["remote_commits"] = _get_commit_list(
+                app_path, f"{current_hash}..{ref}"
+            )
+
+    return data
+
+
 def ensure_child_doctype(doc, table_field, child_doctype):
     """Ensure child rows have the correct doctype set."""
     for row in doc.get(table_field, []):
@@ -180,8 +374,8 @@ def ensure_child_doctype(doc, table_field, child_doctype):
 
 
 @frappe.whitelist()
-def get_sales_person_names():
-    return fetch_sales_person_names()
+def get_sales_person_names(pos_profile=None):
+    return fetch_sales_person_names(pos_profile=pos_profile)
 
 
 @frappe.whitelist()
@@ -474,6 +668,29 @@ LANGUAGE_NAMES = {
 }
 
 
+def _clip_text(value: Any, max_length: int = 2000) -> str:
+    text = cstr(value or "")
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + "..."
+
+
+def _sanitize_client_error_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "kind": _clip_text(payload.get("kind") or "unknown", 80),
+        "message": _clip_text(payload.get("message") or "Unknown client error", 2000),
+        "stack": _clip_text(payload.get("stack") or "", 8000),
+        "filename": _clip_text(payload.get("filename") or "", 500),
+        "lineno": payload.get("lineno"),
+        "colno": payload.get("colno"),
+        "info": _clip_text(payload.get("info") or "", 1000),
+        "route": _clip_text(payload.get("route") or "", 500),
+        "url": _clip_text(payload.get("url") or "", 1000),
+        "user_agent": _clip_text(payload.get("userAgent") or "", 500),
+        "timestamp": _clip_text(payload.get("timestamp") or "", 80),
+    }
+
+
 def _is_cache_valid():
     """Check if language cache is still valid."""
     if not _LANGUAGE_CACHE["last_updated"]:
@@ -650,3 +867,32 @@ def get_language_info(lang_code):
     except Exception as e:
         frappe.log_error(f"Error getting language info for {lang_code}: {str(e)}")
         return {"success": False, "message": "Failed to get language info"}
+
+
+@frappe.whitelist()
+def log_client_error(payload=None):
+    """Capture frontend runtime errors in server logs for debugging."""
+    try:
+        if isinstance(payload, str):
+            parsed_payload = json.loads(payload)
+        elif isinstance(payload, dict):
+            parsed_payload = payload
+        else:
+            parsed_payload = {"message": _clip_text(payload)}
+
+        sanitized_payload = _sanitize_client_error_payload(parsed_payload)
+        title = f"POS Client Error [{sanitized_payload.get('kind', 'unknown')}]"
+        message = {
+            "user": frappe.session.user,
+            "site": frappe.local.site,
+            "payload": sanitized_payload,
+        }
+
+        frappe.log_error(message=json.dumps(message, ensure_ascii=True, default=str), title=title)
+        return {"ok": True}
+    except Exception as exc:
+        frappe.log_error(
+            message=f"Failed to log POS client error: {cstr(exc)}\n{frappe.get_traceback()}",
+            title="POS Client Error Logging Failure",
+        )
+        return {"ok": False}

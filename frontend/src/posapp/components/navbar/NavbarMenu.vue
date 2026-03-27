@@ -1,6 +1,6 @@
 <template>
 	<v-menu
-		:min-width="isMobile ? 280 : 240"
+		:min-width="isMobile ? 240 : 220"
 		:close-on-content-click="true"
 		:location="isMobile ? 'bottom end' : 'bottom end'"
 		:offset="[0, 4]"
@@ -15,6 +15,8 @@
 					'menu-btn-compact pos-themed-button',
 					isMobile ? 'mobile-menu-btn' : 'desktop-menu-btn',
 				]"
+				:aria-label="__('Open actions menu')"
+				:title="__('Open actions menu')"
 			>
 				<template v-if="isMobile">
 					<v-icon class="pos-text-primary">mdi-dots-vertical</v-icon>
@@ -82,175 +84,236 @@
 						@click="$emit('close-shift')"
 						class="menu-item-compact primary-action"
 					>
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact primary-icon">
-							<v-icon color="white" size="16">mdi-content-save-move-outline</v-icon>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact primary-icon">
+								<v-icon color="white" size="16">mdi-content-save-move-outline</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Close Shift")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("End current session")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Close Shift")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("End current session")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-list-item
-					v-if="posProfile.posa_allow_print_last_invoice"
-					@click="$emit('print-last-invoice')"
-					:disabled="!lastInvoiceId"
-					class="menu-item-compact secondary-action"
-				>
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact secondary-icon">
-							<v-icon color="white" size="16">mdi-printer</v-icon>
+					<v-list-item
+						v-if="posProfile.posa_allow_print_last_invoice"
+						@click="printLastInvoice"
+						class="menu-item-compact secondary-action"
+					>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact secondary-icon">
+								<v-icon color="white" size="16">mdi-printer</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Print Last Invoice")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Reprint previous transaction")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Print Last Invoice")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Reprint previous transaction")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-list-item @click="$emit('sync-invoices')" class="menu-item-compact info-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact info-icon">
-							<v-icon color="white" size="16">mdi-sync</v-icon>
+					<v-list-item
+						v-if="isEnabledSetting(posProfile.posa_silent_print)"
+						@click="showQzTrayDialog = true"
+						class="menu-item-compact primary-action"
+					>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact primary-icon">
+								<v-icon color="white" size="16">mdi-printer-wireless</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("QZ Tray Setup")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Connect printer and manage certificate")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Sync Offline Invoices")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Upload pending transactions")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-list-item @click="$emit('toggle-offline')" class="menu-item-compact warning-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact warning-icon">
-							<v-icon color="white" size="16">mdi-wifi-off</v-icon>
+					<v-list-item @click="$emit('sync-invoices')" class="menu-item-compact info-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact info-icon">
+								<v-icon color="white" size="16">mdi-sync</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Sync Offline Invoices")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Upload pending transactions")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							manualOffline ? __("Go Online") : __("Go Offline")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">
-							{{
-								manualOffline
-									? __("Disable offline mode")
-									: __("Work without server connection")
-							}}
-						</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-list-item
-					@click="$emit('clear-cache')"
-					:disabled="manualOffline || !networkOnline || !serverOnline"
-					class="menu-item-compact neutral-action"
-				>
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact neutral-icon">
-							<v-icon color="white" size="16">mdi-delete-sweep-outline</v-icon>
+					<v-list-item
+						v-if="isEnabledSetting(posProfile.posa_enable_customer_display)"
+						@click="$emit('open-customer-display')"
+						class="menu-item-compact primary-action"
+					>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact primary-icon">
+								<v-icon color="white" size="16">mdi-monitor-eye</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Open Customer Display")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Show cart on customer-facing screen")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Clear Cache")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Remove local data and refresh")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-divider class="menu-section-divider-compact"></v-divider>
-
-				<v-list-item @click="$emit('show-about')" class="menu-item-compact neutral-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact neutral-icon">
-							<v-icon color="white" size="16">mdi-information-outline</v-icon>
+					<v-list-item @click="$emit('toggle-offline')" class="menu-item-compact warning-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact warning-icon">
+								<v-icon color="white" size="16">mdi-wifi-off</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								manualOffline ? __("Go Online") : __("Go Offline")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">
+								{{
+									manualOffline
+										? __("Disable offline mode")
+										: __("Work without server connection")
+								}}
+							</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("About")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("App information")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<!-- Language selection menu item -->
-				<v-list-item @click="showLanguageDialog = true" class="menu-item-compact primary-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact primary-icon">
-							<v-icon color="white" size="16">mdi-translate</v-icon>
+					<v-list-item
+						@click="$emit('clear-cache')"
+						:disabled="manualOffline || !networkOnline || !serverOnline"
+						class="menu-item-compact neutral-action"
+					>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact neutral-icon">
+								<v-icon color="white" size="16">mdi-delete-sweep-outline</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Clear Cache")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Remove local data and refresh")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Language")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Change interface language")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<!-- Theme toggle menu item -->
-				<v-list-item @click="$emit('toggle-theme')" class="menu-item-compact info-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact info-icon">
-							<v-icon color="white" size="16">{{
-								$theme.isDark.value ? "mdi-white-balance-sunny" : "mdi-moon-waning-crescent"
-							}}</v-icon>
+					<v-list-item
+						@click="checkForUpdates"
+						:disabled="manualOffline || !networkOnline || !serverOnline"
+						class="menu-item-compact info-action"
+					>
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact info-icon">
+								<v-icon color="white" size="16">mdi-update</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Check for Updates")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Check for new commits")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							$theme.isDark.value ? __("Light Mode") : __("Dark Mode")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Switch theme appearance")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
+					</v-list-item>
 
-				<v-list-item @click="$emit('logout')" class="menu-item-compact danger-action">
-					<template v-slot:prepend>
-						<div class="menu-icon-wrapper-compact danger-icon">
-							<v-icon color="white" size="16">mdi-logout</v-icon>
+					<v-divider class="menu-section-divider-compact"></v-divider>
+
+					<v-list-item @click="$emit('show-about')" class="menu-item-compact neutral-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact neutral-icon">
+								<v-icon color="white" size="16">mdi-information-outline</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("About")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("App information")
+							}}</v-list-item-subtitle>
 						</div>
-					</template>
-					<div class="menu-content-compact">
-						<v-list-item-title class="menu-item-title-compact">{{
-							__("Logout")
-						}}</v-list-item-title>
-						<v-list-item-subtitle class="menu-item-subtitle-compact">{{
-							__("Sign out of session")
-						}}</v-list-item-subtitle>
-					</div>
-				</v-list-item>
-			</v-list>
+					</v-list-item>
+
+					<!-- Language selection menu item -->
+					<v-list-item @click="showLanguageDialog = true" class="menu-item-compact primary-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact primary-icon">
+								<v-icon color="white" size="16">mdi-translate</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Language")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Change interface language")
+							}}</v-list-item-subtitle>
+						</div>
+					</v-list-item>
+
+					<!-- Theme toggle menu item -->
+					<v-list-item @click="$emit('toggle-theme')" class="menu-item-compact info-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact info-icon">
+								<v-icon color="white" size="16">{{
+									$theme.isDark.value
+										? "mdi-white-balance-sunny"
+										: "mdi-moon-waning-crescent"
+								}}</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								$theme.isDark.value ? __("Light Mode") : __("Dark Mode")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Switch theme appearance")
+							}}</v-list-item-subtitle>
+						</div>
+					</v-list-item>
+
+					<v-list-item @click="$emit('logout')" class="menu-item-compact danger-action">
+						<template v-slot:prepend>
+							<div class="menu-icon-wrapper-compact danger-icon">
+								<v-icon color="white" size="16">mdi-logout</v-icon>
+							</div>
+						</template>
+						<div class="menu-content-compact">
+							<v-list-item-title class="menu-item-title-compact">{{
+								__("Logout")
+							}}</v-list-item-title>
+							<v-list-item-subtitle class="menu-item-subtitle-compact">{{
+								__("Sign out of session")
+							}}</v-list-item-subtitle>
+						</div>
+					</v-list-item>
+				</v-list>
 			</div>
 		</v-card>
 	</v-menu>
 
 	<!-- Language Selection Dialog -->
 	<v-dialog v-model="showLanguageDialog" max-width="400" persistent>
-		<v-card>
+		<v-card class="pos-themed-card">
 			<v-card-title class="text-h6 d-flex align-center">
 				<v-icon start color="primary" class="mr-2">mdi-translate</v-icon>
 				{{ __("Select Language") }}
@@ -332,6 +395,8 @@
 		</v-card>
 	</v-dialog>
 
+	<QzTrayDialog v-model="showQzTrayDialog" />
+
 	<!-- Notification Snackbars -->
 	<v-snackbar
 		v-model="notification.show"
@@ -349,7 +414,6 @@
 </template>
 
 <script>
-/* global frappe */
 const FALLBACK_LANGUAGES = [
 	{ code: "en", name: "English", native_name: "English" },
 	{ code: "ar", name: "العربية", native_name: "العربية" },
@@ -357,18 +421,30 @@ const FALLBACK_LANGUAGES = [
 	{ code: "pt", name: "Português", native_name: "Português" },
 ];
 
+import { useLastInvoicePrinting } from "../../composables/core/useLastInvoicePrinting";
+import { useUpdateStore } from "../../stores/updateStore";
+import QzTrayDialog from "./QzTrayDialog.vue";
+
 export default {
 	name: "NavbarMenu",
+	components: {
+		QzTrayDialog,
+	},
 	props: {
 		posProfile: { type: Object, default: () => ({}) },
-		lastInvoiceId: String,
 		manualOffline: Boolean,
 		networkOnline: Boolean,
 		serverOnline: Boolean,
 	},
+	setup() {
+		const { printLastInvoice } = useLastInvoicePrinting();
+		const updateStore = useUpdateStore();
+		return { printLastInvoice, updateStore };
+	},
 	data() {
 		return {
 			showLanguageDialog: false,
+			showQzTrayDialog: false,
 			selectedLanguage: "en",
 			currentLanguage: "en",
 			availableLanguages: FALLBACK_LANGUAGES,
@@ -384,13 +460,6 @@ export default {
 				timeout: 3000,
 			},
 		};
-	},
-	mounted() {
-		// Add window resize listener for responsive behavior
-		this.handleResize = () => {
-			this.windowWidth = window.innerWidth;
-		};
-		window.addEventListener("resize", this.handleResize);
 	},
 	beforeUnmount() {
 		// Clean up the event listener
@@ -439,7 +508,10 @@ export default {
 		},
 	},
 	async mounted() {
-		// Add window resize listener for responsive behavior (already added above)
+		this.handleResize = () => {
+			this.windowWidth = window.innerWidth;
+		};
+		window.addEventListener("resize", this.handleResize);
 		await this.initializeLanguage();
 		this.initializeWesternNumerals();
 	},
@@ -574,14 +646,41 @@ export default {
 			this.notification.show = false;
 		},
 
+		isEnabledSetting(value) {
+			if (value === undefined || value === null) return false;
+			if (typeof value === "string") {
+				const normalized = value.trim().toLowerCase();
+				return ["1", "true", "yes", "on"].includes(normalized);
+			}
+			if (typeof value === "number") return value === 1;
+			return Boolean(value);
+		},
+
+		async checkForUpdates() {
+			try {
+				await this.updateStore.checkForUpdates(true);
+				if (this.updateStore.isUpdateReady) {
+					this.updateStore.clearDismissed();
+					this.updateStore.resetSnooze();
+				} else {
+					this.showNotification("You are up to date", "success");
+				}
+			} catch (error) {
+				this.showNotification(
+					`Failed to check for updates: ${error?.message || "Unknown error"}`,
+					"error",
+				);
+			}
+		},
+
 		__(text) {
 			return window.__ ? window.__(text) : text;
 		},
 	},
 	emits: [
 		"close-shift",
-		"print-last-invoice",
 		"sync-invoices",
+		"open-customer-display",
 		"toggle-offline",
 		"clear-cache",
 		"show-about",
@@ -605,12 +704,12 @@ export default {
 	letter-spacing: 0.5px;
 	box-shadow: none;
 	transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-	background: rgba(25, 118, 210, 0.08) !important;
-	border: 1px solid rgba(25, 118, 210, 0.12);
+	background: var(--pos-hover-bg) !important;
+	border: 1px solid var(--pos-border);
 	backdrop-filter: blur(8px);
 	min-width: 90px;
 	height: 36px;
-	color: #1976d2 !important;
+	color: var(--pos-primary) !important;
 }
 
 /* Mobile Menu Button Styles */
@@ -622,13 +721,13 @@ export default {
 	max-width: 36px !important;
 	width: 36px !important;
 	height: 36px !important;
-	background: rgba(25, 118, 210, 0.08) !important;
-	border: 1px solid rgba(25, 118, 210, 0.12) !important;
+	background: var(--pos-hover-bg) !important;
+	border: 1px solid var(--pos-border) !important;
 }
 
 .mobile-menu-btn:hover {
-	background: rgba(25, 118, 210, 0.12) !important;
-	border-color: rgba(25, 118, 210, 0.2) !important;
+	background: var(--pos-focus-bg) !important;
+	border-color: var(--pos-primary) !important;
 	transform: translateY(-1px);
 }
 
@@ -639,27 +738,27 @@ export default {
 
 /* Elite menu button text and icon colors */
 .menu-btn-compact .v-btn__content {
-	color: #1976d2 !important;
+	color: var(--pos-primary) !important;
 	font-weight: 500;
 }
 
 .menu-btn-compact .pos-text-primary,
 .menu-btn-compact .v-icon {
-	color: #1976d2 !important;
+	color: var(--pos-primary) !important;
 	transition: color 0.25s ease;
 }
 
 .menu-btn-compact:hover {
 	transform: translateY(-1px);
-	box-shadow: 0 4px 12px rgba(25, 118, 210, 0.15);
-	background: rgba(25, 118, 210, 0.12) !important;
-	border-color: rgba(25, 118, 210, 0.2);
+	box-shadow: 0 4px 12px var(--pos-shadow);
+	background: var(--pos-focus-bg) !important;
+	border-color: var(--pos-primary);
 }
 
 .menu-btn-compact:hover .v-btn__content,
 .menu-btn-compact:hover .pos-text-primary,
 .menu-btn-compact:hover .v-icon {
-	color: #1565c0 !important;
+	color: var(--pos-primary-variant) !important;
 }
 
 /* Elite Menu Card - Glass Morphism Design */
@@ -673,8 +772,8 @@ export default {
 		0 8px 16px rgba(0, 0, 0, 0.04),
 		0 0 0 1px rgba(255, 255, 255, 0.3) inset;
 	backdrop-filter: blur(20px) saturate(1.2);
-	min-width: 260px;
-	max-width: 280px;
+	min-width: min(260px, calc(100vw - 24px));
+	max-width: min(280px, calc(100vw - 24px));
 	margin-top: 2px;
 	display: flex;
 	flex-direction: column;
@@ -703,7 +802,7 @@ export default {
 .menu-header-text-compact {
 	font-size: 14px;
 	font-weight: 500;
-	color: #1976d2;
+	color: var(--pos-primary);
 	letter-spacing: 0.5px;
 	opacity: 0.9;
 }
@@ -711,7 +810,7 @@ export default {
 /* Compact Menu List */
 .menu-list-compact {
 	padding: 8px 6px 12px;
-	background: #ffffff;
+	background: var(--pos-card-bg);
 }
 
 /* Compact Menu Items */
@@ -810,7 +909,7 @@ export default {
 .menu-item-title-compact {
 	font-weight: 600;
 	font-size: 14px;
-	color: #212121;
+	color: var(--pos-text-primary);
 	line-height: 1.2;
 	margin-bottom: 1px;
 }
@@ -826,7 +925,7 @@ export default {
 .menu-section-divider-compact {
 	margin: 8px 10px;
 	opacity: 0.12;
-	border-color: #1976d2;
+	border-color: var(--pos-border);
 }
 
 /* Compact Hover Effects */
@@ -871,8 +970,8 @@ export default {
 /* Compact Responsive Design */
 @media (max-width: 768px) {
 	.menu-card-compact {
-		min-width: 280px;
-		max-width: 320px;
+		min-width: min(280px, calc(100vw - 20px));
+		max-width: min(320px, calc(100vw - 20px));
 		border-radius: 14px;
 		min-height: 300px;
 	}
@@ -903,8 +1002,8 @@ export default {
 
 @media (max-width: 480px) {
 	.menu-card-compact {
-		min-width: 260px;
-		max-width: 300px;
+		min-width: min(260px, calc(100vw - 16px));
+		max-width: min(300px, calc(100vw - 16px));
 	}
 
 	.menu-item-compact {

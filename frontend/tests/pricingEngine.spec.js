@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyLocalPricingRules, computeFreeItems } from "../src/lib/pricingEngine.js";
+import { applyLocalPricingRules, computeFreeItems } from "../src/lib/pricingEngine.ts";
 
 const buildIndexes = (config = {}) => {
 	return {

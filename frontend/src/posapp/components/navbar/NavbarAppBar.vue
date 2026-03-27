@@ -1,6 +1,5 @@
 <template>
 	<v-app-bar
-		app
 		flat
 		:height="isMobile ? 64 : 56"
 		:class="[
@@ -78,7 +77,7 @@
 						:aria-label="__('View offline invoices') + ` (${pendingInvoices})`"
 						@click="$emit('show-offline-invoices')"
 					>
-						<v-badge v-if="pendingInvoices > 0" :content="pendingInvoices" color="error" overlap>
+						<v-badge v-if="pendingInvoices > 0" :content="pendingInvoices" color="error" floating>
 							<v-icon class="pos-text-primary">mdi-file-document-multiple-outline</v-icon>
 						</v-badge>
 						<v-icon v-else class="pos-text-primary">mdi-file-document-multiple-outline</v-icon>
@@ -165,7 +164,7 @@
 						@keydown.enter="$emit('show-offline-invoices')"
 						tabindex="0"
 					>
-						<v-badge v-if="pendingInvoices > 0" :content="pendingInvoices" color="error" overlap>
+						<v-badge v-if="pendingInvoices > 0" :content="pendingInvoices" color="error" floating>
 							<v-icon class="pos-text-primary">mdi-file-document-multiple-outline</v-icon>
 						</v-badge>
 						<v-icon v-else class="pos-text-primary">mdi-file-document-multiple-outline</v-icon>
@@ -214,7 +213,7 @@
 </template>
 
 <script>
-import { useRtl } from "../../composables/useRtl.js";
+import { useRtl } from "../../composables/core/useRtl";
 import posLogo from "../pos/pos.png";
 import NavbarInfoGadgets from "./NavbarInfoGadgets.vue";
 
@@ -381,8 +380,9 @@ export default {
 	gap: 12px;
 	flex-direction: row;
 	/* Default to normal row */
-	flex-shrink: 0;
-	min-width: max-content;
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: 100%;
 }
 
 .pos-navbar-title-compact {
@@ -407,6 +407,7 @@ export default {
 	gap: 8px;
 	flex-direction: row;
 	/* Default to normal row */
+	min-width: 0;
 }
 
 .rtl-actions-section {
@@ -424,6 +425,7 @@ export default {
 	justify-content: center;
 	gap: 8px;
 	flex-shrink: 0;
+	min-width: 0;
 }
 
 .mobile-primary-actions {
@@ -522,6 +524,11 @@ export default {
 	.mobile-navbar .pos-navbar-actions-section {
 		gap: 4px;
 	}
+	.pos-navbar-title-compact {
+		max-width: 100%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 }
 
 @media (max-width: 600px) {
@@ -539,11 +546,13 @@ export default {
 	border-bottom: none !important;
 	transition: color 0.3s ease;
 	white-space: nowrap;
-	overflow: visible !important;
+	overflow: hidden !important;
+	text-overflow: ellipsis;
 	display: flex;
 	align-items: center;
-	min-width: max-content;
-	flex-shrink: 0;
+	min-width: 0;
+	max-width: 100%;
+	flex: 1 1 auto;
 	/* Use same blue as Menu button - matching gradient blue */
 	color: #1976d2 !important;
 }
@@ -574,6 +583,8 @@ export default {
 	margin-right: 2px;
 	display: inline-block;
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .pos-navbar-title-bold {
@@ -581,6 +592,8 @@ export default {
 	letter-spacing: 0.25px;
 	display: inline-block;
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 /* RTL Title Spacing */

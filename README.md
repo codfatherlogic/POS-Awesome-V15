@@ -7,6 +7,10 @@
 
 ---
 
+NOTE: Application is undergoing major refactoring. please report for any bug or issue it will be solved on high priority. For now it is stable and tested.
+
+Recommended to use stable version for production. 
+
 ### Quick Start
 
 Follow these steps to install and start using POS Awesome:
@@ -57,6 +61,131 @@ After switching branches or pulling latest changes:
 Go to developer tools in browser, then go to application tab, then go to storage and clear site data.
 After clearing site data go to browser settings and delete cache and images data in history also.
 
+---
+
+### Update Notifications (POS)
+
+- POS automatically checks for updates every 24 hours.
+- Manual check: **Menu → Check for Updates**.
+- Updates are checked **only against the current git branch**.
+- The update dialog shows **all commits ahead** (commit message + date).
+- Dismissed updates will reappear only when a **new commit** is available.
+- It only check for updates on the current branch you are on. It will not update in backend.
+
+---
+
+### Project Structure (Modernized)
+
+Key folders in the modernized POS app:
+
+- `frontend/src/posapp/components/pos/` UI split into small, focused components (invoice, items, payments, closing, etc.)
+- `frontend/src/posapp/composables/` business logic and state orchestration (invoice, items, payments, offers, offline)
+- `frontend/src/posapp/stores/` Pinia stores for normalized app state
+- `posawesome/posawesome/api/` backend APIs split by domain (invoice_processing, item_processing, payment_processing)
+
+---
+
+### TypeScript Migration Status
+
+The POS frontend has been migrated to TypeScript. If you add new modules, prefer `.ts`/`.vue` with `lang="ts"` and keep types in `frontend/src/posapp/types/`.
+
+---
+
+### Returns & Discounts (Important Behavior)
+
+- **Return invoices** use negative quantities and negative totals.
+- **Additional Discount (Percentage)** is recalculated automatically based on the current return total.
+- **Additional Discount (Amount)** is **prorated** on partial returns.
+- Applied as a **negative** discount on returns.
+- For **Return without Invoice**, discount logic depends on the POS Profile and may require manual adjustment.
+
+---
+
+### Payments & Write-Offs
+
+- Write-off amount is capped by POS Profile and validated against payment coverage.
+- Refunds/returns use negative payment amounts.
+- Partial payments and credit sales respect the same write-off limits.
+
+---
+
+### Offline Mode
+
+- Invoices, customers, and payments can be created offline.
+- Background sync replays changes when connectivity returns.
+- Failed offline submissions are saved as Drafts.
+
+---
+
+### POS Cash Movement (Journal Entry Based)
+
+Use this feature to post shift-level cash expenses and cash deposits from POS App without touching monolithic accounting flows.
+
+#### Usage Notes
+
+- Open POS App and go to `Cash Movement` from the side menu (visible only if enabled in POS Profile).
+- Submit `Expense` to book: **Dr Expense Account, Cr POS Cash Account**.
+- Submit `Deposit` to book: **Dr Back Office Cash Account, Cr POS Cash Account**.
+- Entries are saved as `POS Cash Movement` and linked to a submitted `Journal Entry`.
+- History supports:
+  - Submitted/Cancelled/Draft filters
+  - Expense/Deposit filters
+  - Journal Entry reference visibility
+  - Cancel action (profile-controlled)
+  - Delete action for cancelled records (profile-controlled)
+
+#### Admin Configuration (POS Profile)
+
+Configure these fields in `POS Profile`:
+
+- `Enable Cash Movement`
+- `Allow POS Expense`
+- `Allow Cash Deposit`
+- `Default POS Expense Account`
+- `Back Office Cash Account`
+- `Allow Cancel Submitted Cash Movement`
+- `Allow Delete Cancelled Cash Movement`
+- `Require Cash Movement Remarks`
+- `Cash Movement Max Amount`
+
+Recommended setup:
+
+- Set a dedicated `Cash` mode of payment and map it correctly at company level.
+- Set `Default POS Expense Account` and `Back Office Cash Account` before enabling user access.
+- Enable cancel/delete only for trusted operational roles.
+
+#### Offline + Sync Behavior
+
+- Cash movements queue locally when POS is offline.
+- Sync runs from:
+  - Main sync action in POS layout
+  - Manual sync button in Cash Movement screen when queue exists
+- Duplicate-safe replay uses `client_request_id` idempotency.
+
+#### Closing Shift Impact
+
+- Submitted cash movements are included in shift overview.
+- Expected cash on hand is reduced by submitted cash movement total.
+- Closing screen shows a dedicated submitted cash movement summary.
+
+#### Known Limitations / Guardrails
+
+- Backend permissioned runtime tests require a full Frappe/ERPNext bench environment.
+- Cash movement amounts are currently reconciled in company currency for closing impact.
+- If profile flags are disabled mid-shift, creation and management actions are blocked by backend checks.
+
+For deployment details, see `CASH_MOVEMENT_ROLLOUT.md`.
+
+---
+
+### Debugging (Quick Tips)
+
+- Check browser console for errors and attached logs with issue for better debugging.
+- If UI totals look stale after a major update, clear site data from developer tools and browser cache and files from browsing history.
+
+---
+
+
 ### Electron Desktop App
 
 Use the bundled Electron shell when you need an offline-friendly desktop build that remembers the ERPNext server URL.
@@ -73,6 +202,12 @@ Notes:
 
 ### Main Features
 
+#### 🏗️ Architecture (New)
+
+- **Vue Router**: Fully Client-Side Routing for instant navigation between POS, Orders, and Payments.
+- **Modular Design**: Separated concerns using Vue 3 Composition API.
+
+#### 🎨 UI/UX & Interface
 #### 🎨 UI/UX & Interface
 
 - **Modern Interface**: User-friendly design using Vue.js and Vuetify, optimized for speed and experience.
@@ -182,6 +317,7 @@ Notes:
 - [Frappe](https://github.com/frappe/frappe)
 - [Erpnext](https://github.com/frappe/erpnext)
 - [Vue.js](https://github.com/vuejs/vue)
+- [Vue Router](https://router.vuejs.org/) (New Architecture)
 - [Vuetify.js](https://github.com/vuetifyjs/vuetify)
 
 ---

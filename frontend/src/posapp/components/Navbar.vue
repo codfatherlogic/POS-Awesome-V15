@@ -43,10 +43,10 @@
 
 			<template #notification-bell>
 				<NotificationBell
-					:notifications="notificationCenter.items"
-					:unread-count="notificationCenter.unread"
-					@mark-read="markBellNotificationsRead"
-					@clear="clearBellNotifications"
+					:notifications="history"
+					:unread-count="unreadCount"
+					@mark-read="toastStore.markRead()"
+					@clear="toastStore.clearHistory()"
 				/>
 			</template>
 
@@ -54,13 +54,12 @@
 			<template #menu>
 				<NavbarMenu
 					:pos-profile="posProfile"
-					:last-invoice-id="lastInvoiceId"
 					:manual-offline="manualOffline"
 					:network-online="networkOnline"
 					:server-online="serverOnline"
 					@close-shift="openCloseShift"
-					@print-last-invoice="printLastInvoice"
 					@sync-invoices="syncPendingInvoices"
+					@open-customer-display="$emit('open-customer-display')"
 					@toggle-offline="toggleManualOffline"
 					@clear-cache="clearCache"
 					@show-about="showAboutDialog = true"
@@ -84,10 +83,10 @@
 		<AboutDialog v-model="showAboutDialog" />
 
 		<!-- Keep existing dialogs -->
-		<v-dialog v-model="freeze" persistent max-width="290">
+		<v-dialog v-model="isFrozen" persistent max-width="290">
 			<v-card class="pos-themed-card">
 				<v-card-title class="text-h5 pos-text-primary">{{ freezeTitle }}</v-card-title>
-				<v-card-text class="pos-text-secondary">{{ freezeMsg }}</v-card-text>
+				<v-card-text class="pos-text-secondary">{{ freezeMessage }}</v-card-text>
 			</v-card>
 		</v-dialog>
 
@@ -100,14 +99,15 @@
 
 		<!-- Snackbar for notifications -->
 		<v-snackbar
-			v-model="snack"
-			:timeout="snackTimeout"
-			:color="snackColor"
+			v-model="visible"
+			:timeout="timeout"
+			:color="color"
 			:location="isRtl ? 'top left' : 'top right'"
+			@update:modelValue="(val) => !val && toastStore.onSnackbarClosed()"
 		>
-			{{ snackText }}
+			{{ text }}
 			<template v-slot:actions>
-				<v-btn class="pos-themed-button" variant="text" @click="dismissActiveNotification(true)">
+				<v-btn class="pos-themed-button" variant="text" @click="visible = false">
 					{{ __("Close") }}
 				</v-btn>
 			</template>
@@ -116,7 +116,6 @@
 </template>
 
 <script>
-/* global frappe */
 import { defineAsyncComponent } from "vue";
 import NavbarAppBar from "./navbar/NavbarAppBar.vue";
 import NavbarDrawer from "./navbar/NavbarDrawer.vue";
@@ -127,26 +126,43 @@ import CacheUsageMeter from "./navbar/CacheUsageMeter.vue";
 import AboutDialog from "./navbar/AboutDialog.vue";
 import OfflineInvoices from "./OfflineInvoices.vue";
 import posLogo from "./pos/pos.png";
-import { forceClearAllCache } from "../../offline/cache.js";
-import { clearAllCaches } from "../../utils/clearAllCaches.js";
-import { isOffline } from "../../offline/index.js";
-import { useRtl } from "../composables/useRtl.js";
+import { forceClearAllCache } from "../../offline/index";
+import { clearAllCaches } from "../../utils/clearAllCaches";
+import { isOffline } from "../../offline/index";
+import { useRtl } from "../composables/core/useRtl";
 
 const ServerUsageGadget = defineAsyncComponent(() => import("./navbar/ServerUsageGadget.vue"));
 const DatabaseUsageGadget = defineAsyncComponent(() => import("./navbar/DatabaseUsageGadget.vue"));
-const DEFAULT_SNACK_TIMEOUT = 3000;
-const OFFLINE_WARNING_TITLE = "Connection lost. Some features might not work.";
-const OFFLINE_WARNING_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
-const OFFLINE_NOTIFICATION_KEY = "offline-connection-warning";
+
+import { useToastStore } from "../stores/toastStore.js";
+import { useUIStore } from "../stores/uiStore.js";
+import { storeToRefs } from "pinia";
 
 export default {
 	name: "NavBar",
 	setup() {
 		const { isRtl, rtlStyles, rtlClasses } = useRtl();
+		const toastStore = useToastStore();
+		const uiStore = useUIStore();
+		// Extract reactive refs
+		const { visible, text, color, timeout, history, unreadCount } = storeToRefs(toastStore);
+		const { isFrozen, freezeTitle, freezeMessage } = storeToRefs(uiStore);
+
 		return {
 			isRtl,
 			rtlStyles,
 			rtlClasses,
+			toastStore,
+			uiStore,
+			visible,
+			text,
+			color,
+			timeout,
+			history,
+			unreadCount,
+			isFrozen,
+			freezeTitle,
+			freezeMessage,
 		};
 	},
 	components: {
@@ -170,7 +186,6 @@ export default {
 			type: Number,
 			default: 0,
 		},
-		lastInvoiceId: String,
 		networkOnline: Boolean,
 		serverOnline: Boolean,
 		serverConnecting: Boolean,
@@ -210,32 +225,18 @@ export default {
 			drawer: false,
 			mini: true,
 			item: 0,
-			items: [
-				{ text: "POS", icon: "mdi-network-pos" },
-				{ text: "Payments", icon: "mdi-credit-card" },
+			baseItems: [
+				{ text: "POS", icon: "mdi-network-pos", to: "/pos" },
+				{ text: "Awesome Dashboard", icon: "mdi-view-dashboard-outline", to: "/dashboard" },
+				{ text: "Payments", icon: "mdi-credit-card", to: "/payments" },
+				{ text: "Purchase Order", icon: "mdi-cart-plus", to: "/orders" },
+				{ text: "Barcode Printing", icon: "mdi-barcode", to: "/barcode" },
 			],
+			items: [],
 			company: "POS Awesome",
 			companyImg: posLogo,
 			showAboutDialog: false,
 			showOfflineInvoices: false,
-			freeze: false,
-			freezeTitle: "",
-			freezeMsg: "",
-			snack: false,
-			snackText: "",
-			snackColor: "success",
-			snackTimeout: DEFAULT_SNACK_TIMEOUT,
-			notificationQueue: [],
-			currentNotification: null,
-			clearQueuedOnClose: false,
-			lastNotificationShownAt: {},
-			clearingCache: false,
-			notificationUpdateHandle: null,
-			notificationUpdateUsesTimeout: false,
-			notificationCenter: {
-				items: [],
-				unread: 0,
-			},
 			lastSyncTotalsSnapshot: { pending: 0, synced: 0, drafted: 0 },
 			syncNotificationPrimed: false,
 		};
@@ -253,6 +254,13 @@ export default {
 			deep: true,
 			immediate: true,
 		},
+		posProfile: {
+			handler() {
+				this.updateNavigationItems();
+			},
+			deep: true,
+			immediate: true,
+		},
 	},
 	computed: {
 		appBarColor() {
@@ -260,6 +268,7 @@ export default {
 		},
 	},
 	mounted() {
+		this.updateNavigationItems();
 		this.initializeNavbar();
 		this.setupEventListeners();
 	},
@@ -278,9 +287,7 @@ export default {
 			this.notificationUpdateHandle = null;
 		}
 		if (this.eventBus) {
-			this.eventBus.off("show_message", this.showMessage);
-			this.eventBus.off("freeze", this.handleFreeze);
-			this.eventBus.off("unfreeze", this.handleUnfreeze);
+			this.eventBus.off("show_message");
 			this.eventBus.off("set_company", this.handleSetCompany);
 			this.eventBus.off("invoice_submission_failed", this.handleInvoiceSubmissionFailed);
 		}
@@ -307,8 +314,28 @@ export default {
 				}
 			}
 		},
+		updateNavigationItems() {
+			const items = [...this.baseItems];
+			if (this.posProfile?.posa_enable_cash_movement) {
+				items.push({
+					text: "Cash Movement",
+					icon: "mdi-cash-sync",
+					to: "/cash-movement",
+				});
+			}
+			this.items = items;
+		},
 
 		initializeNavbar() {
+			// Watch store for company changes
+			this.$watch(
+				() => this.uiStore.companyDoc,
+				(doc) => {
+					this.handleSetCompany(doc);
+				},
+				{ deep: true, immediate: true },
+			);
+
 			// Enhanced initialization with better reactivity handling
 			const updateCompanyInfo = () => {
 				let updated = false;
@@ -359,10 +386,7 @@ export default {
 
 		setupEventListeners() {
 			if (this.eventBus) {
-				this.eventBus.on("show_message", this.showMessage);
-				this.eventBus.on("freeze", this.handleFreeze);
-				this.eventBus.on("unfreeze", this.handleUnfreeze);
-				this.eventBus.on("set_company", this.handleSetCompany);
+				this.eventBus.on("show_message", (data) => this.toastStore.show(data));
 				this.eventBus.on("invoice_submission_failed", this.handleInvoiceSubmissionFailed);
 			}
 		},
@@ -373,14 +397,9 @@ export default {
 		goDesk() {
 			window.location.href = "/app";
 		},
-		changePage(page) {
-			this.$emit("change-page", page);
-		},
+
 		openCloseShift() {
 			this.$emit("close-shift");
-		},
-		printLastInvoice() {
-			this.$emit("print-last-invoice");
 		},
 		syncPendingInvoices() {
 			this.$emit("sync-invoices");
@@ -393,7 +412,7 @@ export default {
 				return;
 			}
 			if (isOffline()) {
-				this.showMessage({
+				this.toastStore.show({
 					color: "warning",
 					title: this.__("Cannot clear cache while offline"),
 				});
@@ -402,7 +421,7 @@ export default {
 			let shouldReload = false;
 			try {
 				this.clearingCache = true;
-				this.showMessage({
+				this.toastStore.show({
 					color: "info",
 					title: this.__("Clearing local cache..."),
 				});
@@ -415,14 +434,14 @@ export default {
 				if (westernPref !== null && typeof localStorage !== "undefined") {
 					localStorage.setItem("use_western_numerals", westernPref);
 				}
-				this.showMessage({
+				this.toastStore.show({
 					color: "success",
 					title: this.__("Cache cleared successfully"),
 				});
 				shouldReload = true;
 			} catch (e) {
 				console.error("Failed to clear cache", e);
-				this.showMessage({
+				this.toastStore.show({
 					color: "error",
 					title: this.__("Failed to clear cache"),
 				});
@@ -457,7 +476,7 @@ export default {
 				this.lastSyncTotalsSnapshot = normalized;
 
 				if (this.hasOfflineSyncCounts(normalized)) {
-					this.addBellNotification({
+					this.toastStore.show({
 						title: this.__("Offline invoices status"),
 						detail: this.__("Pending: {0} | Synced: {1} | Draft: {2}", [
 							normalized.pending,
@@ -482,7 +501,7 @@ export default {
 							])
 						: this.__("No pending offline invoices");
 
-				this.addBellNotification({
+				this.toastStore.show({
 					title: pendingTitle,
 					detail: this.__("Pending count updated from {0} to {1}", [
 						previous.pending,
@@ -493,7 +512,7 @@ export default {
 			}
 
 			if (diffSynced > 0) {
-				this.addBellNotification({
+				this.toastStore.show({
 					title: this.__("{0} offline invoice{1} synced", [diffSynced, diffSynced > 1 ? "s" : ""]),
 					detail: this.__("Pending: {0}", [normalized.pending]),
 					color: "success",
@@ -501,7 +520,7 @@ export default {
 			}
 
 			if (diffDrafted > 0) {
-				this.addBellNotification({
+				this.toastStore.show({
 					title: this.__("{0} offline invoice{1} saved as draft", [
 						diffDrafted,
 						diffDrafted > 1 ? "s" : "",
@@ -512,7 +531,7 @@ export default {
 			}
 
 			if (normalized.pending === 0 && previous.pending > 0 && diffSynced === 0 && diffDrafted === 0) {
-				this.addBellNotification({
+				this.toastStore.show({
 					title: this.__("Offline invoices synced"),
 					detail: this.__("All pending invoices are up to date"),
 					color: "success",
@@ -551,260 +570,20 @@ export default {
 				? this.__("Invoice {0} submission failed", [invoiceNumber])
 				: this.__("Invoice submission failed");
 
-			this.addBellNotification({
+			this.toastStore.show({
 				title,
 				detail: this.__("Saved as draft because: {0}", [reasonText]),
 				color: "error",
 				timestamp: payload.timestamp || Date.now(),
 			});
 
-			this.showMessage({
-				title,
-				summary: title,
-				detail: reasonText,
-				color: "error",
-				groupId: "invoice-submission-failed",
-			});
+			// Show message already handled by toastStore.show above? No, above adds to history and shows snack.
+			// The original code did both: addBellNotification (history) and showMessage (snack).
+			// Our new toastStore.show does both. So one call is enough.
 		},
-		addBellNotification(notification = {}) {
-			const title = notification.title || this.__("Notification");
-			const detail = notification.detail || "";
-			const color = notification.color || "info";
-			const timestamp = notification.timestamp || Date.now();
 
-			const entry = {
-				id: `${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
-				title,
-				detail,
-				color,
-				timestamp,
-			};
+		// Notification logic moved to toastStore
 
-			this.notificationCenter.items = [entry, ...this.notificationCenter.items].slice(0, 20);
-			this.notificationCenter.unread += 1;
-		},
-		markBellNotificationsRead() {
-			this.notificationCenter.unread = 0;
-		},
-		clearBellNotifications() {
-			this.notificationCenter.items = [];
-			this.notificationCenter.unread = 0;
-		},
-		showMessage(data) {
-			const notification = this.normalizeNotification(data);
-
-			if (!notification.title) {
-				return;
-			}
-
-			if (this.shouldThrottleNotification(notification)) {
-				return;
-			}
-
-			if (this.currentNotification && this.currentNotification.key === notification.key) {
-				this.mergeNotifications(this.currentNotification, notification);
-				this.updateActiveNotification();
-				return;
-			}
-
-			const existingQueued = this.notificationQueue.find((item) => item.key === notification.key);
-
-			if (existingQueued) {
-				this.mergeNotifications(existingQueued, notification);
-			} else {
-				this.notificationQueue.push({ ...notification });
-			}
-
-			if (!this.currentNotification && !this.snack) {
-				this.processNextNotification();
-			}
-		},
-		normalizeNotification(data = {}) {
-			const title = typeof data.title === "string" ? data.title.trim() : "";
-			const color = data.color || "success";
-			const timeout =
-				typeof data.timeout === "number" && data.timeout >= 0 ? data.timeout : DEFAULT_SNACK_TIMEOUT;
-			const summary = typeof data.summary === "string" ? data.summary.trim() : "";
-			const detail = typeof data.detail === "string" ? data.detail.trim() : "";
-			const count = Number.isFinite(data.count) && data.count > 0 ? Math.floor(data.count) : 1;
-			const providedKey =
-				(typeof data.groupId === "string" && data.groupId.trim()) ||
-				(typeof data.groupKey === "string" && data.groupKey.trim()) ||
-				"";
-
-			const offlineWarning = this.isConnectionLossNotification(title, summary, detail);
-			const cooldownMs =
-				typeof data.cooldownMs === "number" && data.cooldownMs >= 0
-					? data.cooldownMs
-					: offlineWarning
-						? OFFLINE_WARNING_COOLDOWN_MS
-						: undefined;
-
-			const baseKey = offlineWarning
-				? OFFLINE_NOTIFICATION_KEY
-				: providedKey || `${color}::${summary || title}`;
-
-			return {
-				title,
-				color,
-				timeout,
-				count,
-				key: baseKey,
-				summary,
-				latestDetail: detail,
-				cooldownMs,
-				isOfflineWarning: offlineWarning,
-			};
-		},
-		shouldThrottleNotification(notification) {
-			const effectiveCooldown = this.getNotificationCooldown(notification);
-			if (!effectiveCooldown) {
-				return false;
-			}
-
-			const lastShown = this.lastNotificationShownAt[notification.key] || 0;
-			const now = Date.now();
-
-			if (now - lastShown < effectiveCooldown) {
-				return true;
-			}
-
-			this.lastNotificationShownAt[notification.key] = now;
-			return false;
-		},
-		getNotificationCooldown(notification) {
-			if (typeof notification.cooldownMs === "number") {
-				return notification.cooldownMs;
-			}
-
-			if (notification.isOfflineWarning || notification.title === OFFLINE_WARNING_TITLE) {
-				return OFFLINE_WARNING_COOLDOWN_MS;
-			}
-
-			return 0;
-		},
-		isConnectionLossNotification(title = "", summary = "", detail = "") {
-			const combined = `${title} ${summary} ${detail}`.toLowerCase();
-			if (!combined) {
-				return false;
-			}
-
-			return (
-				combined.includes("connection lost") ||
-				combined.includes("not connected to internet") ||
-				(combined.includes("connection") && combined.includes("offline")) ||
-				(combined.includes("internet") && combined.includes("retry"))
-			);
-		},
-		mergeNotifications(target, incoming) {
-			target.count += incoming.count;
-			target.timeout = Math.max(target.timeout, incoming.timeout);
-			if (incoming.title) {
-				target.title = incoming.title;
-			}
-			if (incoming.summary) {
-				target.summary = incoming.summary;
-			}
-			if (incoming.latestDetail) {
-				target.latestDetail = incoming.latestDetail;
-			}
-		},
-		processNextNotification() {
-			if (!this.notificationQueue.length) {
-				this.currentNotification = null;
-				return;
-			}
-
-			const nextNotification = this.notificationQueue.shift();
-			this.currentNotification = { ...nextNotification };
-			this.updateActiveNotification();
-		},
-		updateActiveNotification() {
-			if (!this.currentNotification) {
-				return;
-			}
-
-			if (this.notificationUpdateHandle !== null) {
-				return;
-			}
-
-			const hasWindow = typeof window !== "undefined";
-			const scheduleWithRaf = hasWindow && typeof window.requestAnimationFrame === "function";
-
-			if (scheduleWithRaf) {
-				this.notificationUpdateUsesTimeout = false;
-				this.notificationUpdateHandle = window.requestAnimationFrame(() => {
-					this.notificationUpdateHandle = null;
-					this.applyNotificationState();
-				});
-			} else {
-				this.notificationUpdateUsesTimeout = true;
-				this.notificationUpdateHandle = setTimeout(() => {
-					this.notificationUpdateHandle = null;
-					this.applyNotificationState();
-				}, 16);
-			}
-		},
-		applyNotificationState() {
-			if (!this.currentNotification) {
-				return;
-			}
-
-			this.snackColor = this.currentNotification.color;
-			this.snackTimeout = this.currentNotification.timeout;
-			this.snackText = this.formatNotificationMessage(this.currentNotification);
-
-			if (!this.snack) {
-				this.snack = true;
-			}
-		},
-		formatNotificationMessage(notification) {
-			if (!notification) {
-				return "";
-			}
-
-			const baseText = notification.summary || notification.title;
-
-			if (!baseText) {
-				return notification.title || "";
-			}
-
-			const multiplier = notification.count > 1 ? ` (${notification.count}×)` : "";
-			const detail = notification.latestDetail;
-
-			if (notification.summary && detail) {
-				return `${baseText}${multiplier} – ${detail}`;
-			}
-
-			return `${baseText}${multiplier}`;
-		},
-		dismissActiveNotification(clearQueue = false) {
-			if (clearQueue) {
-				this.clearQueuedOnClose = true;
-			}
-			this.snack = false;
-		},
-		handleSnackbarClosed() {
-			if (this.clearQueuedOnClose) {
-				this.notificationQueue = [];
-			}
-			this.clearQueuedOnClose = false;
-			this.currentNotification = null;
-
-			if (this.notificationQueue.length) {
-				this.$nextTick(() => this.processNextNotification());
-			}
-		},
-		handleFreeze(data) {
-			this.freezeTitle = data?.title || "";
-			this.freezeMsg = data?.message || "";
-			this.freeze = true;
-		},
-		handleUnfreeze() {
-			this.freeze = false;
-			this.freezeTitle = "";
-			this.freezeMsg = "";
-		},
 		handleSetCompany(data) {
 			if (typeof data === "string") {
 				this.company = data;
@@ -828,8 +607,8 @@ export default {
 		"nav-click",
 		"change-page",
 		"close-shift",
-		"print-last-invoice",
 		"sync-invoices",
+		"open-customer-display",
 		"toggle-offline",
 		"toggle-theme",
 		"logout",

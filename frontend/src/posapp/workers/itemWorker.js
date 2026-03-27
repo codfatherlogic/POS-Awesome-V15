@@ -9,6 +9,8 @@ const BASE_SCHEMA = {
 	items: "&item_code,item_name,item_group,*barcodes,*name_keywords,*serials,*batches",
 	item_prices: "&[price_list+item_code],price_list,item_code",
 	customers: "&name,customer_name,mobile_no,email_id,tax_id",
+	pos_profiles: "&name",
+	opening_shifts: "&name,user,pos_profile",
 	local_stock: "&key",
 	coupons: "&key",
 	item_groups: "&key",
@@ -145,6 +147,7 @@ const SCHEMA_SIGNATURE = JSON.stringify(BASE_SCHEMA);
 				console.warn("Worker failed to persist schema signature", err);
 			}
 		});
+	db.version(10).stores(BASE_SCHEMA);
 	try {
 		await db.open();
 	} catch (err) {
@@ -156,6 +159,7 @@ const KEY_TABLE_MAP = {
 	offline_invoices: "queue",
 	offline_customers: "queue",
 	offline_payments: "queue",
+	offline_cash_movements: "queue",
 	item_details_cache: "cache",
 	customer_storage: "cache",
 	local_stock_cache: "local_stock",
