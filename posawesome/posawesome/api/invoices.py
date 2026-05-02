@@ -353,6 +353,21 @@ def _should_block(pos_profile):
     return bool(block_sale)
 
 
+def _enforce_update_stock_policy(invoice_doc, pos_profile=None):
+    """If the POS Profile has `posa_validate_update_stock` enabled, force
+    `update_stock = 1` on the invoice so stock is reduced and validated on
+    submit. Returns True when the flag is on (caller should skip the legacy
+    `posa_delivery_date -> update_stock = 0` override)."""
+    if not pos_profile:
+        pos_profile = invoice_doc.get("pos_profile") if hasattr(invoice_doc, "get") else None
+    if not pos_profile:
+        return False
+    if cint(frappe.db.get_value("POS Profile", pos_profile, "posa_validate_update_stock") or 0):
+        invoice_doc.update_stock = 1
+        return True
+    return False
+
+
 def _validate_stock_on_invoice(invoice_doc):
     if invoice_doc.doctype == "Sales Invoice" and not cint(getattr(invoice_doc, "update_stock", 0)):
         frappe.logger().debug("Skipping stock validation for Sales Invoice without stock update")
@@ -516,6 +531,8 @@ def update_invoice(data):
         invoice_doc.update(data)
     else:
         invoice_doc = frappe.get_doc(data)
+
+    _enforce_update_stock_policy(invoice_doc, pos_profile)
 
     # Set currency from data before set_missing_values
     # Validate return items if this is a return invoice
@@ -916,8 +933,9 @@ def submit_invoice(invoice, data, submit_in_background=False):
 
     # Ensure item name overrides are respected on submit
     _apply_item_name_overrides(invoice_doc)
-    if invoice.get("posa_delivery_date"):
-        invoice_doc.update_stock = 0
+    if not _enforce_update_stock_policy(invoice_doc, pos_profile):
+        if invoice.get("posa_delivery_date"):
+            invoice_doc.update_stock = 0
     mop_cash_list = [
         i.mode_of_payment
         for i in invoice_doc.payments
