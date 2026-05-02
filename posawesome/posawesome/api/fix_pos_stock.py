@@ -31,7 +31,10 @@ def _get_candidate_invoices(from_date=None, to_date=None, invoice=None):
         "posa_pos_opening_shift": ["is", "set"],
     }
     if invoice:
-        filters["name"] = invoice
+        if isinstance(invoice, (list, tuple, set)):
+            filters["name"] = ["in", list(invoice)]
+        else:
+            filters["name"] = invoice
     if from_date:
         filters["posting_date"] = [">=", getdate(from_date)]
     if to_date:
@@ -62,14 +65,21 @@ def create_missing_delivery_notes(
     to_date=None,
     invoice=None,
     allow_negative_stock=False,
+    submit_dn=True,
 ):
     """Create a Delivery Note (same posting_date as the invoice) for every
     POS-created submitted Sales Invoice whose update_stock = 0 and which has
     no existing Delivery Note. Each invoice is processed in its own
     transaction; failures are logged and skipped.
+
+    Set submit_dn=False to leave each Delivery Note as a Draft (docstatus=0)
+    so it can be reviewed/edited and submitted manually. Drafts do not affect
+    stock until submitted, so this also works for invoices whose current
+    stock balance can't cover the historical sale.
     """
     dry_run = bool(dry_run)
     allow_negative_stock = bool(allow_negative_stock)
+    submit_dn = bool(submit_dn)
 
     candidates = _get_candidate_invoices(from_date=from_date, to_date=to_date, invoice=invoice)
 
@@ -115,10 +125,14 @@ def create_missing_delivery_notes(
                     dn.flags.allow_negative_stock = True
                 dn.flags.ignore_permissions = True
                 dn.insert()
-                dn.submit()
+                if submit_dn:
+                    dn.submit()
                 frappe.db.commit()
-                summary["created"].append({"sales_invoice": si_name, "delivery_note": dn.name})
-                print(f"[OK] {si_name} -> {dn.name}")
+                state = "submitted" if submit_dn else "draft"
+                summary["created"].append(
+                    {"sales_invoice": si_name, "delivery_note": dn.name, "state": state}
+                )
+                print(f"[OK] {si_name} -> {dn.name} ({state})")
             except Exception as exc:
                 frappe.db.rollback(save_point=savepoint)
                 summary["failed"].append({"sales_invoice": si_name, "error": str(exc)})
