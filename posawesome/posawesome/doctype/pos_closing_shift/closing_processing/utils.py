@@ -1,6 +1,7 @@
 import frappe
 from frappe.utils import flt
 
+
 def get_base_value(doc, fieldname, base_fieldname=None, conversion_rate=None):
     """Return the value for a field in company currency."""
 

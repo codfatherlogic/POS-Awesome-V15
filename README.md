@@ -37,6 +37,10 @@ Follow these steps to install and start using POS Awesome:
         - **Applicable for Users** – add the users allowed to use this POS.
         - **Payment Methods** – add accepted modes (e.g., Cash, Card).
 
+    - Optional operational settings:
+        - Assign trusted users the **POS Awesome Supervisor** role from **User > Roles** when they need supervisor-only POS controls.
+        - Enable **Allow Offline Sale Without Stock Verification** if offline invoices should be saved even when local stock data is missing or insufficient. Stock is still validated again on the server when the invoice syncs.
+
 4. **Save the profile**
 
 5. **Start selling**
@@ -106,6 +110,14 @@ The POS frontend has been migrated to TypeScript. If you add new modules, prefer
 - Write-off amount is capped by POS Profile and validated against payment coverage.
 - Refunds/returns use negative payment amounts.
 - Partial payments and credit sales respect the same write-off limits.
+- POS Awesome Payments supports **Receive** and **Pay** workflows from the Payments route.
+- **Receive** is used for customer payments and can create new Payment Entries, reconcile unallocated payments, reconcile M-Pesa payments, and allocate payments against outstanding Sales Invoices.
+- **Pay** supports customer payouts, supplier/vendor payments, and employee payments. Supplier/vendor payments can be allocated against outstanding Purchase Invoices.
+- Reconciliation can be done manually by selecting invoices and unallocated payments, or automatically with **Auto Allocate Payment Amount** / auto reconcile.
+- Customer reconciliation supports Sales Invoices, credit notes, unallocated Payment Entries, and M-Pesa entries when enabled.
+- Supplier/vendor reconciliation supports Purchase Invoices and supplier unallocated payments.
+- Payment creation and reconciliation are controlled from POS Profile with `Use POS Awesome Payments`, `Allow Make New Payments`, `Allow Reconcile Payments`, and `Allow Mpesa Reconcile Payments`.
+- Multi-currency payment methods are supported with exchange-rate handling when invoice, party, and bank/cash account currencies differ.
 
 ---
 
@@ -114,6 +126,71 @@ The POS frontend has been migrated to TypeScript. If you add new modules, prefer
 - Invoices, customers, and payments can be created offline.
 - Background sync replays changes when connectivity returns.
 - Failed offline submissions are saved as Drafts.
+- **Allow Offline Sale Without Stock Verification** on POS Profile lets offline invoice saving continue when local stock cache is missing or below the requested quantity.
+- This option only skips local offline stock blocking. Server-side stock validation still runs when the invoice syncs online.
+
+---
+
+### POS Awesome Supervisor
+
+Supervisor access is now controlled by the **POS Awesome Supervisor** role on the **User** doctype. This replaces the old user-level `posa_is_pos_supervisor` custom field and uses the new role name instead of **POS Supervisor**.
+
+Users with this role can access supervisor-only POS functions:
+
+- Open the **Awesome Dashboard** from the POS navigation/menu, when the dashboard is enabled for the POS Profile.
+- View dashboard data for the current profile, a specific profile, or all allowed profiles depending on dashboard scope settings.
+- Use supervisor invoice-management scope to view/search submitted invoices and drafts across the company, with profile filtering available from the invoice management dialog.
+- See supervisor-only item rate details such as last purchase rate and cost/manufacturing cost while selecting items.
+- Issue and top up gift cards from the payments/gift-card workflows. Non-supervisors can still check gift-card balances when gift cards are enabled.
+
+To grant access, open the ERPNext **User** record and add **POS Awesome Supervisor** in the user's Roles table.
+
+---
+
+### Gift Cards
+
+Gift cards are available when **Use Gift Cards** is enabled on POS Profile.
+
+- Cashiers can scan or enter gift-card codes and check live balance/status.
+- Gift cards can be redeemed from the invoice payment screen.
+- POS supervisors can issue new gift cards and top up existing cards from the payment/gift-card workflows.
+- Gift-card issue and top-up actions create the required accounting entry against the configured gift-card liability account.
+- Supervisor management is controlled by POS Profile gift-card settings and the **POS Awesome Supervisor** role.
+
+---
+
+### Purchase Orders, Receiving, And Purchase Payments
+
+The **Purchase Order** module lets users create purchasing documents directly from POS.
+
+- Create Purchase Orders from the POS item selector.
+- Select supplier/vendor, warehouse, transaction date, and schedule date.
+- Use supplier-specific buying price lists and supplier currency where available.
+- Optionally receive stock immediately by creating a linked Purchase Receipt.
+- Optionally create a linked Purchase Invoice.
+- Pay suppliers/vendors from the same purchase flow using POS Profile payment methods.
+- Create new suppliers/vendors from POS when `Allow Create Suppliers from POS` is enabled.
+- Create purchase items from POS when `Allow Create Items from POS` is enabled.
+
+Configure the purchase feature from POS Profile:
+
+- `Allow Purchase Order`
+- `Allow Receive Stock from POS`
+- `Allow Create Items from POS`
+- `Allow Create Suppliers from POS`
+
+---
+
+### Barcode Printing
+
+The **Barcode Printing** module prints item labels directly from POS.
+
+- Add barcode-enabled items from the item selector.
+- Choose item UOM and label quantity per row.
+- Print labels or export them as PDF.
+- Configure A4 label grids by rows and columns.
+- Optionally include item price and batch/serial details on labels.
+- Supports scale/weighted barcode generation using scale barcode settings and item/UOM barcode templates.
 
 ---
 
@@ -225,6 +302,8 @@ Notes:
 - **Multi-Currency**: Full support for invoicing in different currencies with automatic exchange rate fetching.
 - **Quotations**: Create, update, and submit Quotations directly from the POS interface.
 - **Sales Orders**: Create Sales Orders directly. Configurable "Sales Order Only" mode available.
+- **Purchase Orders**: Create supplier/vendor Purchase Orders from POS, with optional Purchase Receipt, Purchase Invoice, and supplier payment creation.
+- **Purchase Receiving**: Receive stock from POS when allowed by POS Profile.
 - **Returns**: Process returns for Cash or Customer Credit (Credit Note).
 - **Credit Sales**: Support for credit sales with configurable due dates.
 - **Change Posting Date**: Ability to change the transaction posting date (backdating) if allowed by profile.
@@ -239,31 +318,45 @@ Notes:
 - **UOM Support**: Barcode and pricing support specific to Units of Measure.
 - **Weighted Products**: Support for scale/weighted product barcodes.
 - **Stock Validation**: Configurable stock validation (warn or block) including negative stock handling.
+- **Offline Stock Verification Skip**: POS Profile option to save offline invoices even when local stock cannot be verified, while keeping server validation during sync.
+- **Barcode Printing**: Build item label batches, print barcodes, export PDF labels, include price/batch/serial data, and generate scale barcodes for weighted items.
 
 #### 💳 Payments & Pricing
 
+- **POS Awesome Payments**: Dedicated payment route for customer Receive workflows and Pay workflows for customers, suppliers/vendors, and employees.
+- **Payment Entry Creation**: Create new Payment Entries from POS when enabled in POS Profile.
+- **Payment Reconciliation**: Reconcile outstanding invoices against unallocated payments, credit notes, and M-Pesa payments.
+- **Auto Reconcile**: Automatically allocate available unallocated payments against outstanding invoices in chronological order.
+- **Supplier/Vendor Payments**: Pay suppliers/vendors and allocate payments against Purchase Invoices.
+- **Employee Payments**: Pay employees through the POS payments workflow.
+- **Payment Auto Allocation**: Automatically allocate newly created payment amounts against selected invoices when enabled.
+- **Payment Reference Tracking**: Capture reference number/date for POS-created payments.
 - **Smart Tender**: "Quick Cash" suggestions based on currency denominations for faster checkout.
 - **Split Payments**: Accept multiple payment modes for a single transaction.
 - **M-Pesa**: Integrated M-Pesa mobile payment support.
+- **Gift Cards**: Check gift-card balances, redeem gift cards at checkout, and allow supervisors to issue or top up cards.
 - **Loyalty Points**: Earn and redeem Customer Loyalty Points.
 - **Coupons & Offers**: Support for POS Coupons, Promotional Offers, and Referral Codes.
 - **Price Lists**: Support for Customer/Group price lists, with option to manually select Price List per transaction.
 - **Discounts**: Customer-level and Transaction-level discount support.
 - **Delivery Charges**: Add shipping/delivery charges to the invoice.
 - **Write Off**: Option to write off small difference amounts in change.
-- **Payment Reconciliation**: Reconcile payments against existing invoices.
 
 #### 🔄 Offline & Technical
 
 - **Robust Offline Mode**: Create invoices and customers offline. Data syncs automatically when reconnected.
+- **Offline Payments**: POS Awesome Payments can be queued offline and synced when connectivity returns.
 - **Background Sync**: Advanced background synchronization for offline transactions and master data updates.
 - **Local Storage**: Option to use browser Local Storage for caching to improve reliability.
 - **Background Submission**: Enqueue invoice submission to background jobs for faster UI response.
 - **Drafts**: Failed offline submissions are safely saved as Draft documents.
+- **Offline Stock Guard Control**: `Allow Offline Sale Without Stock Verification` can defer stock blocking to online sync when local stock data is incomplete.
 
 #### ⚙️ Configuration & Shift Management
 
 - **Shift Management**: Opening and Closing shifts with cash reconciliation and detailed payment breakdown reports.
+- **Role-Based Supervisor Access**: Supervisor features are granted through the **POS Awesome Supervisor** role on User roles.
+- **Cash Movement**: Profile-controlled POS expenses and cash deposits with closing-shift impact.
 - **Customer Balance**: Option to display current customer balance on the main screen.
 - **Address Management**: Manage multiple shipping addresses for customers.
 - **ERPNext v15 Support**: Fully compatible with the latest ERPNext version.

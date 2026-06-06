@@ -1,14 +1,27 @@
 {
   "name": "posawesome",
-  "version": "15.26.0",
+  "version": "15.30.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/defendicon/POS-Awesome-V15.git"
+  },
+  "homepage": "https://github.com/defendicon/POS-Awesome-V15",
+  "bugs": {
+    "url": "https://github.com/defendicon/POS-Awesome-V15/issues"
+  },
   "main": "electron/main.js",
   "scripts": {
     "dev": "cd frontend && yarn dev",
     "build": "cd frontend && yarn install && yarn build",
+    "lint": "eslint .",
+    "test:build-verify": "node scripts/verify_build_artifacts.test.mjs",
+    "verify:build": "node scripts/verify_build_artifacts.mjs",
     "electron:dev": "electron .",
+    "electron:smoke": "node scripts/electron_smoke_check.mjs",
     "electron:build": "electron-builder",
     "electron:build:linux": "electron-builder --linux",
     "electron:build:win": "electron-builder --win",
+    "release:verify": "yarn verify:build && yarn electron:smoke --require-artifact",
     "format": "prettier --write \"**/*.{js,vue,css,scss,html}\""
   },
   "dependencies": {
@@ -39,10 +52,11 @@
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/github": "^11.0.4",
     "@semantic-release/release-notes-generator": "^14.0.3",
+    "@typescript-eslint/parser": "8.54.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.25.5",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.5",
     "eslint": "^9.16.0",
     "eslint-plugin-vue": "^9.32.0",
     "eslint-plugin-vuetify": "^2.5.1",
@@ -51,6 +65,7 @@
     "prettier": "^3.6.2",
     "semantic-release": "^24.2.7",
     "tailwindcss": "^3.4.4",
+    "typescript": "5.9.3",
     "vue-eslint-parser": "^10.2.0"
   },
   "build": {

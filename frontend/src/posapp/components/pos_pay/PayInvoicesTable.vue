@@ -4,12 +4,7 @@
 		<v-row>
 			<v-col md="7" cols="12">
 				<p>
-					<strong>{{ __("Invoices") }}</strong>
-					<span v-if="totalOutstanding" class="text-primary"
-						>{{ __("- Total Outstanding") }} :
-						{{ currencySymbol(posProfile.currency) }}
-						{{ formatCurrency(totalOutstanding) }}</span
-					>
+					<strong>{{ resolvedSectionTitle }}</strong>
 				</p>
 			</v-col>
 			<v-col md="5" cols="12">
@@ -73,25 +68,22 @@
 				></v-select>
 			</v-col>
 			<v-col md="8" cols="12">
-				<div class="text-caption text-medium-emphasis mt-2">
+				<div class="text-body-2 mt-2">
 					<span v-for="(data, key) in outstandingByCurrency" :key="key" class="mr-4">
-						<strong>
+						<span class="text-primary font-weight-bold">
 							{{ formatCurrency(data.amount) }}
 							{{ data.symbol }}
 							{{ data.party_currency }}
 							<span v-if="data.party_currency !== data.invoice_currency">
 								({{ data.invoice_currency }})
 							</span>
-						</strong>
+						</span>
 					</span>
 				</div>
 			</v-col>
 		</v-row>
 
-		<v-row
-			v-if="posProfile.posa_allow_reconcile_payments && invoices.length && customerName"
-			class="mb-2"
-		>
+		<v-row v-if="posProfile.posa_allow_reconcile_payments && invoices.length && partyName" class="mb-2">
 			<v-col md="4" cols="12" class="pb-1">
 				<v-btn
 					block
@@ -135,9 +127,9 @@
 			<template v-slot:item.outstanding_amount="{ item }">
 				<span class="text-primary"
 					>{{
-						currencySymbol(item?.party_account_currency || item?.currency || posProfile.currency)
+						currencySymbol(item?.currency || posProfile.currency)
 					}}
-					{{ formatCurrency(item?.outstanding_amount || 0) }}</span
+					{{ formatCurrency(item?.outstanding_amount_in_invoice_currency ?? item?.outstanding_amount ?? 0) }}</span
 				>
 			</template>
 		</v-data-table>
@@ -147,6 +139,8 @@
 
 <script setup>
 import { computed } from "vue";
+
+const __ = (text) => (window.__ ? window.__(text) : text);
 
 const props = defineProps({
 	invoices: Array,
@@ -163,7 +157,8 @@ const props = defineProps({
 	loading: Boolean,
 	autoReconcileLoading: Boolean,
 	autoReconcileSummary: String,
-	customerName: String,
+	partyName: String,
+	sectionTitle: String,
 	isInvoiceSelected: Function,
 	itemClass: Function,
 	currencySymbol: Function,
@@ -206,6 +201,8 @@ const normalizedPosProfiles = computed(() =>
 		})
 		.filter(Boolean),
 );
+
+const resolvedSectionTitle = computed(() => props.sectionTitle || __("Invoices"));
 
 const invoiceRowProps = ({ item }) => {
 	if (!props.itemClass) {

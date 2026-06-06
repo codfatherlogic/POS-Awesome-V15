@@ -38,6 +38,15 @@ def _get_scale_settings_metadata(settings) -> Dict[str, Any]:
     return metadata
 
 
+def _get_barcode_row_uom(row) -> str:
+    """Return ERPNext's standard Item Barcode UOM."""
+
+    if not row:
+        return ""
+    getter = row.get if hasattr(row, "get") else lambda key, default=None: getattr(row, key, default)
+    return cstr(getter("uom") or "").strip()
+
+
 def _segment_end(start: int, digits: int, decimals: int = 0) -> int:
     if not start or not digits:
         return 0
@@ -128,7 +137,7 @@ def _find_item_scale_template(item_code: str, uom: Optional[str] = None) -> str:
     rows = frappe.get_all(
         "Item Barcode",
         filters={"parent": item_code_value},
-        fields=["barcode", "posa_uom"],
+        fields=["barcode", "uom"],
     )
     if not rows:
         return ""
@@ -136,16 +145,8 @@ def _find_item_scale_template(item_code: str, uom: Optional[str] = None) -> str:
     requested_uom = cstr(uom or "").strip()
     ordered_rows = rows
     if requested_uom:
-        matched = [
-            row
-            for row in rows
-            if cstr(row.get("posa_uom") or "").strip() == requested_uom
-        ]
-        unmatched = [
-            row
-            for row in rows
-            if cstr(row.get("posa_uom") or "").strip() != requested_uom
-        ]
+        matched = [row for row in rows if _get_barcode_row_uom(row) == requested_uom]
+        unmatched = [row for row in rows if _get_barcode_row_uom(row) != requested_uom]
         ordered_rows = matched + unmatched
 
     for row in ordered_rows:
@@ -401,13 +402,13 @@ def get_items_from_barcode(selling_price_list, currency, barcode):
         search_item = frappe.db.get_value(
             "Item Barcode",
             {"barcode": barcode},
-            ["parent as item_code", "posa_uom"],
+            ["parent as item_code", "uom"],
             as_dict=1,
         )
         if not search_item:
             return None
         item_code = search_item.item_code
-        item_uom = search_item.posa_uom
+        item_uom = _get_barcode_row_uom(search_item)
     else:
         item_uom = None
 

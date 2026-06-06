@@ -257,6 +257,24 @@ export function useClosingSummary(
 		);
 	});
 
+	const loyaltyRedemptionSummary = computed(() => {
+		const ov = unref(overview);
+		return (
+			ov?.loyalty_redemption || {
+				count: 0,
+				points: 0,
+				company_currency_total: 0,
+				by_currency: [],
+			}
+		);
+	});
+
+	const loyaltyRedemptionByCurrency = computed(() => {
+		return Array.isArray(loyaltyRedemptionSummary.value.by_currency)
+			? loyaltyRedemptionSummary.value.by_currency
+			: [];
+	});
+
 	const cashExpectedByCurrency = computed(() => {
 		return Array.isArray(cashExpectedSummary.value.by_currency)
 			? cashExpectedSummary.value.by_currency
@@ -342,6 +360,10 @@ export function useClosingSummary(
 			cashMovementSummary.value.company_currency_total,
 			overviewCompanyCurrency.value,
 		);
+		const loyaltyValue = formatCurrencyWithSymbol(
+			loyaltyRedemptionSummary.value.company_currency_total,
+			overviewCompanyCurrency.value,
+		);
 		const cashValue = formatCurrencyWithSymbol(
 			cashExpectedSummary.value.company_currency_total,
 			overviewCompanyCurrency.value,
@@ -379,6 +401,14 @@ export function useClosingSummary(
 				caption: `${__("Submitted entries")}: ${formatCount(cashMovementSummary.value.count || 0)}`,
 				icon: "mdi-cash-sync",
 				color: "accent-warning",
+			},
+			{
+				key: "loyalty-redemption",
+				label: __("Loyalty Redeemed"),
+				value: loyaltyValue,
+				caption: `${__("Points")}: ${formatCount(loyaltyRedemptionSummary.value.points || 0)}`,
+				icon: "mdi-star-circle-outline",
+				color: "accent-info",
 			},
 			{
 				key: "cash-expected",
@@ -484,6 +514,8 @@ export function useClosingSummary(
 		changeReturnedRows,
 		cashExpectedByCurrency,
 		cashMovementSummary,
+		loyaltyRedemptionSummary,
+		loyaltyRedemptionByCurrency,
 		primaryInsights,
 		secondaryInsights,
 		shouldShowCompanyEquivalent,

@@ -138,9 +138,13 @@ import {
 	getOpeningDialogStorage,
 	setOpeningDialogStorage,
 	setOpeningStorage,
+	getBootstrapSnapshot,
+	setBootstrapSnapshot,
 	initPromise,
 	checkDbHealth,
 } from "../../../../offline/index";
+import { createBootstrapSnapshotFromRegisterData } from "../../../../offline/bootstrapSnapshot";
+import authService from "../../../services/authService";
 
 defineOptions({
 	name: "OpeningDialog",
@@ -153,6 +157,7 @@ const props = defineProps({
 const emit = defineEmits(["close", "register"]);
 const __ = window.__ || ((text) => text);
 const get_currency_symbol = window.get_currency_symbol;
+const BUILD_VERSION = typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
 
 const isOpen = ref(props.dialog ? props.dialog : false);
 const is_loading = ref(false);
@@ -270,6 +275,11 @@ function submit_dialog() {
 				emit("register", r.message);
 				try {
 					setOpeningStorage(r.message);
+					setBootstrapSnapshot(
+						createBootstrapSnapshotFromRegisterData(r.message, getBootstrapSnapshot(), {
+							buildVersion: BUILD_VERSION,
+						}),
+					);
 				} catch (e) {
 					console.error("Failed to cache opening data", e);
 				}
@@ -288,7 +298,7 @@ function go_desk() {
 function logout() {
 	const redirectTarget = "/app/posapp";
 	const loginPath = `/login?redirect-to=${encodeURIComponent(redirectTarget)}`;
-	frappe.call("logout").finally(() => {
+	authService.logout().finally(() => {
 		const loginUrl =
 			frappe?.utils?.get_url?.(loginPath) ??
 			(frappe?.urllib?.get_base_url?.() ? `${frappe.urllib.get_base_url()}${loginPath}` : loginPath);

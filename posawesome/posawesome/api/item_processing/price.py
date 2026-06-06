@@ -3,6 +3,7 @@ from frappe import _
 from frappe.utils import flt
 from posawesome.posawesome.api.item_processing.barcode import _parse_scale_barcode_data
 
+
 @frappe.whitelist()
 def update_price_list_rate(item_code, price_list, rate, uom=None):
     """Create or update Item Price for the given item and price list."""

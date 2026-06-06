@@ -33,7 +33,8 @@ import {
 	scheduleChunkRecoveryStateReset,
 } from "./utils/chunkLoadRecovery";
 import { finalizePendingBundleActivation } from "./utils/bundleVersionActivation";
-import "../sw-updater"; // Initialize service worker auto-updater
+import { reconcileBuildChangeOnStartup } from "./utils/buildCacheReconciler";
+import { initPromise, isOffline } from "../offline";
 import App from "./App.vue";
 // @ts-ignore
 import {
@@ -41,6 +42,8 @@ import {
 	initLongTaskObserver,
 	isPerfEnabled,
 } from "./utils/perf.js";
+
+declare const __BUILD_VERSION__: string;
 
 attachProfilerHelpers();
 
@@ -55,7 +58,64 @@ if (typeof frappe === "undefined") {
 	frappe.provide("frappe.PosApp");
 }
 
-frappe.PosApp.posapp = class {
+export async function initPosStorage() {
+	await initPromise;
+}
+
+export async function runPosBootSync() {
+	const buildVersion =
+		typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
+	await reconcileBuildChangeOnStartup({
+		runtimeBuildVersion: buildVersion,
+		isOnline: !isOffline(),
+	});
+}
+
+async function startOptionalRuntimeServices() {
+	const socketStore = useSocketStore();
+	socketStore.init();
+
+	await import("../sw-updater").catch((error) => {
+		console.warn("Failed to initialize POS service worker updater", error);
+	});
+
+	if (!document.querySelector('link[rel="manifest"]')) {
+		const link = document.createElement("link");
+		link.rel = "manifest";
+		link.href = "/manifest.json";
+		document.head.appendChild(link);
+	}
+
+	if (
+		("serviceWorker" in navigator &&
+			window.location.protocol === "https:") ||
+		window.location.hostname === "localhost" ||
+		window.location.hostname === "127.0.0.1"
+	) {
+		// Register at `/sw.js?v=<build>` so a new build forces a fresh
+		// SW registration. The sw.js bytes are stable across deploys
+		// (the file reads version.json at runtime), so without a
+		// per-build URL discriminator the browser keeps the old SW
+		// instance serving its old precache. Symptom in the field:
+		// "POS won't let me add items" — the operator sees the new
+		// Pinia store hooked up to the OLD bundle's DOM. Frappe drops
+		// the query string for static files, so the served bytes are
+		// identical; only the registration scope key differs.
+		const swBuildVersion =
+			typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : "";
+		const swUrl = swBuildVersion
+			? `/sw.js?v=${encodeURIComponent(swBuildVersion)}`
+			: "/sw.js";
+		navigator.serviceWorker
+			.register(swUrl)
+			.then((registration) => {
+				console.log("SW registered successfully", registration);
+			})
+			.catch((err) => console.error("SW registration failed", err));
+	}
+}
+
+class PosAppController {
 	$parent: any;
 	page: any;
 	app: any;
@@ -63,7 +123,8 @@ frappe.PosApp.posapp = class {
 	routerHistory: any;
 	$el: any;
 
-	constructor({ parent }: { parent: any }) {
+	constructor(input: any) {
+		const parent = input?.parent || input;
 		this.$parent = $(document);
 		this.page = parent?.page || parent;
 		this.app = null;
@@ -72,6 +133,9 @@ frappe.PosApp.posapp = class {
 
 	make_body() {
 		this.$el = this.$parent.find(".main-section");
+	}
+
+	async initializeApp() {
 		// Vuetify instance is now imported from plugins/vuetify.ts
 		this.app = createApp(App);
 		const { router, history } = createPosAppRouter();
@@ -113,37 +177,15 @@ frappe.PosApp.posapp = class {
 			scheduleChunkRecoveryStateReset();
 			scheduleAfterStableBoot(() => {
 				void finalizePendingBundleActivation();
+				void startOptionalRuntimeServices();
 			});
 		});
-
-		// Initialize socket listeners
-		const socketStore = useSocketStore();
-		socketStore.init();
 
 		if (isPerfEnabled()) {
 			initLongTaskObserver("posapp");
 		}
 
-		if (!document.querySelector('link[rel="manifest"]')) {
-			const link = document.createElement("link");
-			link.rel = "manifest";
-			link.href = "/manifest.json";
-			document.head.appendChild(link);
-		}
-
-		if (
-			("serviceWorker" in navigator &&
-				window.location.protocol === "https:") ||
-			window.location.hostname === "localhost" ||
-			window.location.hostname === "127.0.0.1"
-		) {
-			navigator.serviceWorker
-				.register("/sw.js")
-				.then((registration) => {
-					console.log("SW registered successfully", registration);
-				})
-				.catch((err) => console.error("SW registration failed", err));
-		}
+		return this;
 	}
 
 	unmount() {
@@ -178,4 +220,24 @@ frappe.PosApp.posapp = class {
 	}
 
 	setup_header() {}
+}
+
+export async function mountPosApp(pageRef: any) {
+	if (pageRef?.$PosApp) {
+		return pageRef.$PosApp;
+	}
+
+	const instance = new PosAppController(pageRef);
+	await instance.initializeApp();
+	if (pageRef) {
+		pageRef.$PosApp = instance;
+	}
+	return instance;
+}
+
+frappe.PosApp.posapp = class extends PosAppController {
+	constructor(pageRef: any) {
+		super(pageRef);
+		void this.initializeApp();
+	}
 };

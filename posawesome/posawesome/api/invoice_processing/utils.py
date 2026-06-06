@@ -11,6 +11,7 @@ from frappe.utils import (
 )
 from erpnext.setup.utils import get_exchange_rate
 
+
 def _get_return_validity_settings(pos_profile: str | None = None):
     """Return whether return validity is enabled and the default days window.
 
@@ -137,9 +138,11 @@ def get_latest_rate(from_currency: str, to_currency: str, cache=None):
 
     return result
 
+
 @frappe.whitelist()
 def get_price_list_currency(price_list):
     return frappe.db.get_value("Price List", price_list, "currency")
+
 
 @frappe.whitelist()
 def get_available_currencies():

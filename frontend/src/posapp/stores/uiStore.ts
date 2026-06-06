@@ -1,3 +1,35 @@
+/**
+ * Central UI state bus for the POS main view.
+ *
+ * **Loading vs. freeze overlays**
+ * Two distinct blocking states exist:
+ * - `isLoading` / `loadingText` — non-blocking spinner shown during async work.
+ * - `isFrozen` / `freezeTitle` / `freezeMessage` — blocks all user interaction
+ *   (e.g. during payment submission). Managed via `freeze()` / `unfreeze()`.
+ *
+ * **Active view**
+ * `activeView` drives the main content panel: `"items"` | `"payment"` |
+ * `"offers"` | `"coupons"`. Updated via `setActiveView()`.
+ *
+ * **POS session data**
+ * `posProfile`, `stockSettings`, `companyDoc`, and `posOpeningShift` are set once
+ * at register boot through `setRegisterData()`. `currency` and `company` are
+ * derived computed properties from `posProfile`.
+ *
+ * **Dialog triggers**
+ * Dialogs are opened and closed through dedicated action pairs:
+ * `openPaymentDialog` / `closePaymentDialog`, `openInvoiceManagement` /
+ * `closeInvoiceManagement`, `openDrafts` / `closeDrafts`, `openOrders` /
+ * `closeOrders`, `openNewAddress` / `closeNewAddress`, `openMpesaPayments` /
+ * `closeMpesaPayments`, `openVariants` / `closeVariants`.
+ *
+ * **Counter-based triggers**
+ * Some side effects are driven by incrementing a counter ref rather than emitting
+ * events, to avoid Vue event-bus coupling:
+ * - `searchFocusTrigger` (via `triggerItemSearchFocus()`) — focuses the item search input.
+ * - `forceReloadTrigger` (via `triggerForceReloadItems()`) — forces the item list to reload.
+ * - `triggerTopItemSelection` (via `selectTopItem()`) — selects the first item in the list.
+ */
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import type { POSProfile } from "../types/models";
@@ -17,8 +49,12 @@ export const useUIStore = defineStore("ui", () => {
   const paymentDialogOpen = ref(false);
 
   const invoiceManagementDialog = ref(false);
+  const invoiceManagementTargetTab = ref<string>("history");
+  const invoiceManagementDraftSource = ref<string>("invoice");
   const draftsDialog = ref(false);
   const draftsData = ref<any[]>([]);
+  const parkedOrders = ref<any[]>([]);
+  const draftSource = ref<string>("invoice");
 
   const ordersDialog = ref(false);
   const ordersData = ref<any[]>([]);
@@ -35,12 +71,16 @@ export const useUIStore = defineStore("ui", () => {
     paymentDialogOpen.value = false;
   };
 
-  const openInvoiceManagement = () => {
+  const openInvoiceManagement = (targetTab: string = "history", draftSourceKey: string = "invoice") => {
+    invoiceManagementTargetTab.value = targetTab || "history";
+    invoiceManagementDraftSource.value = draftSourceKey || "invoice";
     invoiceManagementDialog.value = true;
   };
 
   const closeInvoiceManagement = () => {
     invoiceManagementDialog.value = false;
+    invoiceManagementTargetTab.value = "history";
+    invoiceManagementDraftSource.value = "invoice";
   };
 
   const paymentRouteTarget = ref<any | null>(null);
@@ -53,14 +93,36 @@ export const useUIStore = defineStore("ui", () => {
     paymentRouteTarget.value = null;
   };
 
-  const openDrafts = (data?: any[]) => {
-    draftsData.value = data || [];
+  const openDrafts = (data?: any[], sourceKey: string = "invoice") => {
+    const nextDrafts = Array.isArray(data) ? data : [];
+    draftSource.value = sourceKey || "invoice";
+    draftsData.value = nextDrafts;
+    parkedOrders.value = nextDrafts;
     draftsDialog.value = true;
   };
 
   const closeDrafts = () => {
     draftsDialog.value = false;
   };
+
+  const setDraftsData = (data?: any[]) => {
+    draftsData.value = Array.isArray(data) ? data : [];
+  };
+
+  const setParkedOrders = (data?: any[]) => {
+    parkedOrders.value = Array.isArray(data) ? data : [];
+  };
+
+  const setDraftSource = (sourceKey?: string) => {
+    draftSource.value = sourceKey || "invoice";
+  };
+
+  const setInvoiceManagementDraftSource = (sourceKey?: string) => {
+    invoiceManagementDraftSource.value = sourceKey || "invoice";
+  };
+
+  const parkedOrdersCount = computed(() => parkedOrders.value.length);
+  const hasParkedOrders = computed(() => parkedOrdersCount.value > 0);
 
   const openOrders = (data?: any[]) => {
     ordersData.value = data || [];
@@ -226,6 +288,8 @@ export const useUIStore = defineStore("ui", () => {
     activeView,
     paymentDialogOpen,
     invoiceManagementDialog,
+    invoiceManagementTargetTab,
+    invoiceManagementDraftSource,
     paymentRouteTarget,
     setActiveView,
     openPaymentDialog,
@@ -236,8 +300,16 @@ export const useUIStore = defineStore("ui", () => {
     clearPaymentRouteTarget,
     draftsDialog,
     draftsData,
+    parkedOrders,
+    draftSource,
+    parkedOrdersCount,
+    hasParkedOrders,
     openDrafts,
     closeDrafts,
+    setDraftsData,
+    setParkedOrders,
+    setDraftSource,
+    setInvoiceManagementDraftSource,
     ordersDialog,
     ordersData,
     openOrders,

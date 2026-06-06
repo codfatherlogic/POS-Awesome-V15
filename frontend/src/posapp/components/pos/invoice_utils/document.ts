@@ -4,8 +4,10 @@ import {
 	isOffline,
 } from "../../../../offline/index";
 import { _getPlcConversionRate } from "./currency";
+import { resolvePosDocumentDoctype } from "../../../utils/posDocumentMode";
 
 declare const flt: (_value: unknown, _precision?: number) => number;
+declare const frappe: any;
 
 function normalizeBackendDate(context: any, value: any): string | null {
 	if (value === null || typeof value === "undefined" || value === "") {
@@ -30,6 +32,36 @@ function resolveOrderDeliveryDate(context: any, sourceDoc: any): string | null {
 			sourceDoc?.delivery_date ||
 			context.new_delivery_date,
 	);
+}
+
+function resolveTodayDate(context: any): string | null {
+	const fallbackToday = new Date().toISOString().slice(0, 10);
+	const rawToday =
+		typeof frappe !== "undefined" && frappe?.datetime?.nowdate
+			? frappe.datetime.nowdate()
+			: fallbackToday;
+
+	return normalizeBackendDate(context, rawToday);
+}
+
+function shouldEnableManualPostingDate(
+	context: any,
+	sourceDoc: any,
+	postingDate: string | null,
+): boolean {
+	if (
+		sourceDoc?.set_posting_time === 1 ||
+		sourceDoc?.set_posting_time === true
+	) {
+		return true;
+	}
+
+	if (!postingDate) {
+		return false;
+	}
+
+	const today = resolveTodayDate(context);
+	return Boolean(today && postingDate !== today);
 }
 
 function clearStalePartyFieldsForCustomerChange(
@@ -121,20 +153,10 @@ export function get_invoice_doc(context: any) {
 	}
 
 	// Always set these fields first
-	if (context.invoiceType === "Quotation") {
-		doc.doctype = "Quotation";
-	} else if (
-		context.invoiceType === "Order" &&
-		context.pos_profile?.posa_create_only_sales_order
-	) {
-		doc.doctype = "Sales Order";
-	} else if (
-		context.pos_profile?.create_pos_invoice_instead_of_sales_invoice
-	) {
-		doc.doctype = "POS Invoice";
-	} else {
-		doc.doctype = "Sales Invoice";
-	}
+	doc.doctype = resolvePosDocumentDoctype({
+		invoiceType: context.invoiceType,
+		posProfile: context.pos_profile,
+	});
 	doc.is_pos = 1;
 	doc.ignore_pricing_rule = 0;
 	doc.company = doc.company || context.pos_profile?.company || null;
@@ -144,6 +166,7 @@ export function get_invoice_doc(context: any) {
 
 	// Keep stock update explicit for invoice doctypes so submit-time checks are predictable.
 	if (doc.doctype === "Sales Invoice" || doc.doctype === "POS Invoice") {
+		const explicitFlowUpdateStock = context.flowContext?.update_stock;
 		const profileUpdateStock = context.pos_profile?.update_stock;
 		const defaultUpdateStock =
 			profileUpdateStock === 0 ||
@@ -153,8 +176,13 @@ export function get_invoice_doc(context: any) {
 				: 1;
 		const isOrderInvoiceFlow =
 			context.invoiceType === "Order" &&
-			!context.pos_profile?.posa_create_only_sales_order;
-		doc.update_stock = isOrderInvoiceFlow ? 0 : defaultUpdateStock;
+			doc.doctype !== "Sales Order";
+		doc.update_stock =
+			explicitFlowUpdateStock === 0 || explicitFlowUpdateStock === 1
+				? explicitFlowUpdateStock
+				: isOrderInvoiceFlow
+					? 0
+					: defaultUpdateStock;
 	}
 
 	// Currency related fields
@@ -391,9 +419,13 @@ export function get_invoice_doc(context: any) {
 	doc.posa_notes = sourceDoc.posa_notes ?? null;
 	doc.posa_authorization_code = sourceDoc.posa_authorization_code ?? null;
 	doc.posa_return_valid_upto = sourceDoc.posa_return_valid_upto ?? null;
-	doc.posting_date = context.formatDateForBackend
-		? context.formatDateForBackend(context.posting_date_display)
-		: context.posting_date_display;
+	doc.posting_date = normalizeBackendDate(
+		context,
+		context.posting_date_display ?? context.posting_date,
+	);
+	if (shouldEnableManualPostingDate(context, sourceDoc, doc.posting_date)) {
+		doc.set_posting_time = 1;
+	}
 
 	// Sales Order/Quotation require delivery dates at validation time.
 	if (doc.doctype === "Sales Order" || doc.doctype === "Quotation") {
@@ -514,6 +546,24 @@ export function get_invoice_items(context: any) {
 			}),
 			...(item.pos_invoice_item && {
 				pos_invoice_item: item.pos_invoice_item,
+			}),
+			...(item.quotation && {
+				quotation: item.quotation,
+			}),
+			...(item.quotation_item && {
+				quotation_item: item.quotation_item,
+			}),
+			...(item.sales_order && {
+				sales_order: item.sales_order,
+			}),
+			...(item.so_detail && {
+				so_detail: item.so_detail,
+			}),
+			...(item.delivery_note && {
+				delivery_note: item.delivery_note,
+			}),
+			...(item.dn_detail && {
+				dn_detail: item.dn_detail,
 			}),
 			// Explicitly include stock status to optimize backend validation loops
 			// where O(N) cache lookups occur if this flag is missing.

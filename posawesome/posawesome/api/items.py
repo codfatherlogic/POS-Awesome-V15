@@ -22,30 +22,27 @@ from posawesome.posawesome.api.utils import (
 from posawesome.posawesome.api.item_processing.stock import (
     get_stock_availability,
     get_bulk_stock_availability,
-    get_available_qty
+    get_available_qty,
 )
 from posawesome.posawesome.api.item_processing.barcode import (
     parse_scale_barcode,
     get_items_from_barcode,
     build_scale_barcode,
-    search_serial_or_batch_or_barcode_number
+    search_serial_or_batch_or_barcode_number,
 )
 from posawesome.posawesome.api.item_processing.details import (
     get_items_details,
     get_item_detail,
     get_item_variants,
     get_item_attributes,
-    get_item_optional_attributes
+    get_item_optional_attributes,
 )
-from posawesome.posawesome.api.item_processing.price import (
-    update_price_list_rate,
-    get_price_for_uom
-)
+from posawesome.posawesome.api.item_processing.price import update_price_list_rate, get_price_for_uom
 from posawesome.posawesome.api.item_processing.search import (
     get_items,
     get_items_groups,
     get_items_count,
-    normalize_brand
+    normalize_brand,
 )
 
 
@@ -110,24 +107,23 @@ def get_delta_items(
     resolved_limit = max(1, min(resolved_limit, 2000))
 
     effective_price_list = price_list or profile.get("selling_price_list")
-    base_items = get_items(
-        profile_json,
-        price_list=effective_price_list,
-        item_group="",
-        search_value="",
-        customer=customer,
-        limit=resolved_limit,
-        modified_after=parsed_modified_after.isoformat(),
-    ) or []
+    base_items = (
+        get_items(
+            profile_json,
+            price_list=effective_price_list,
+            item_group="",
+            search_value="",
+            customer=customer,
+            limit=resolved_limit,
+            modified_after=parsed_modified_after.isoformat(),
+        )
+        or []
+    )
 
     if len(base_items) >= resolved_limit:
         return base_items[:resolved_limit]
 
-    existing_codes = {
-        row.get("item_code")
-        for row in base_items
-        if row and row.get("item_code")
-    }
+    existing_codes = {row.get("item_code") for row in base_items if row and row.get("item_code")}
 
     delta_codes = _collect_delta_item_codes(
         profile,
@@ -195,11 +191,7 @@ def get_delta_items(
         price_list=effective_price_list,
         customer=customer,
     )
-    detail_map = {
-        row.get("item_code"): row
-        for row in (details or [])
-        if row and row.get("item_code")
-    }
+    detail_map = {row.get("item_code"): row for row in (details or []) if row and row.get("item_code")}
 
     for item in item_rows:
         item_code = item.get("item_code")
@@ -219,10 +211,12 @@ def get_delta_items(
 
     return base_items[:resolved_limit]
 
+
 def build_item_cache(item_code):
     """Build item cache for faster access."""
     # Implementation for building item cache
     pass
+
 
 @frappe.whitelist()
 def get_item_brand(item_code):

@@ -9,7 +9,7 @@
 					density="compact"
 					variant="solo"
 					color="primary"
-					:label="$frappe._('Available Credit')"
+					:label="$frappe._('Stored Value Source')"
 					class="sleek-field pos-themed-input"
 					hide-details
 					:model-value="formatCurrency(row.total_credit)"
@@ -22,7 +22,7 @@
 					density="compact"
 					variant="solo"
 					color="primary"
-					:label="$frappe._('Redeem Credit')"
+					:label="$frappe._('Apply Stored Value')"
 					class="sleek-field pos-themed-input"
 					hide-details
 					type="text"

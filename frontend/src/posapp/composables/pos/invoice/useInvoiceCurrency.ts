@@ -1,7 +1,41 @@
+/**
+ * Currency, exchange-rate, and price-list management for the active invoice.
+ *
+ * **Two exchange rates**
+ * The composable tracks two distinct rates that serve different purposes:
+ * - `exchange_rate` — price-list currency → selected display currency. Used when
+ *   converting item prices for display in the customer's preferred currency.
+ * - `conversion_rate` — selected currency → company base currency. Used in
+ *   accounting fields (`base_*`) on the invoice document.
+ *
+ * **Currency and price list data**
+ * `fetch_available_currencies` retrieves supported currencies from the server and
+ * falls back to `getCachedCurrencyOptions` when offline. Similarly,
+ * `fetch_price_lists` uses `getCachedPriceListMeta` as its offline source.
+ *
+ * **Precision helpers**
+ * `flt(value, precision?)` rounds to `currency_precision` by default, while
+ * `roundAmount(value)` always uses `currency_precision`. These wrap the shared
+ * `format.methods.flt` utility.
+ *
+ * **Item rate propagation**
+ * Calling `update_currency` or `update_item_rates` iterates the current invoice
+ * items and recalculates their `rate`, `base_rate`, and `amount` fields using the
+ * active exchange and conversion rates. The `bus` event system notifies other
+ * composables (e.g. discount recalculation) after each rate change.
+ */
 import { ref, computed, watch } from "vue";
 import { useInvoiceStore } from "../../../stores/invoiceStore";
 import { useToastStore } from "../../../stores/toastStore";
 import { useUIStore } from "../../../stores/uiStore";
+import {
+	getCachedCurrencyOptions,
+	getCachedExchangeRate,
+	getCachedPriceListMeta,
+	saveCurrencyOptionsCache,
+	saveExchangeRateCache,
+	savePriceListMetaCache,
+} from "../../../../offline/index";
 
 // @ts-ignore
 const __ = window.__ || ((s) => s);
@@ -59,6 +93,7 @@ export function useInvoiceCurrency() {
 
 	const fetch_available_currencies = async () => {
 		if (!pos_profile.value) return [];
+		const profileName = pos_profile.value.name;
 		try {
 			const r = await frappe.call({
 				method: "posawesome.posawesome.api.invoices.get_available_currencies",
@@ -80,11 +115,20 @@ export function useInvoiceCurrency() {
 				if (!selected_currency.value) {
 					selected_currency.value = baseCurrency;
 				}
+				saveCurrencyOptionsCache(profileName, available_currencies.value);
 				return available_currencies.value;
 			}
 			return [];
 		} catch (error) {
 			console.error("Error fetching currencies:", error);
+			const cachedCurrencies = getCachedCurrencyOptions(profileName);
+			if (Array.isArray(cachedCurrencies) && cachedCurrencies.length) {
+				available_currencies.value = cachedCurrencies;
+				if (!selected_currency.value) {
+					selected_currency.value = pos_profile.value.currency;
+				}
+				return available_currencies.value;
+			}
 			const defaultCurrency = pos_profile.value.currency;
 			available_currencies.value = [
 				{ value: defaultCurrency, title: defaultCurrency },
@@ -97,6 +141,10 @@ export function useInvoiceCurrency() {
 	const update_currency_and_rate = async () => {
 		if (!selected_currency.value || !pos_profile.value) return;
 
+		const rateDate =
+			(typeof frappe !== "undefined" && frappe.datetime?.get_today?.()) ||
+			exchange_rate_date.value ||
+			new Date().toISOString().slice(0, 10);
 		const companyCurrency =
 			(company.value && company.value.default_currency) ||
 			pos_profile.value.currency;
@@ -116,6 +164,14 @@ export function useInvoiceCurrency() {
 				});
 				if (r && r.message) {
 					exchange_rate.value = r.message.exchange_rate;
+					saveExchangeRateCache({
+						profileName: pos_profile.value.name,
+						company: pos_profile.value.company,
+						fromCurrency: plCurrency,
+						toCurrency: selected_currency.value,
+						date: r.message.date || rateDate,
+						exchange_rate: r.message.exchange_rate,
+					});
 				}
 			}
 
@@ -134,14 +190,52 @@ export function useInvoiceCurrency() {
 				if (r2 && r2.message) {
 					conversion_rate.value = r2.message.exchange_rate;
 					exchange_rate_date.value = r2.message.date;
+					saveExchangeRateCache({
+						profileName: pos_profile.value.name,
+						company: pos_profile.value.company,
+						fromCurrency: selected_currency.value,
+						toCurrency: companyCurrency,
+						date: r2.message.date || rateDate,
+						exchange_rate: r2.message.exchange_rate,
+					});
 				}
 			}
 		} catch (error) {
 			console.error("Error updating currency:", error);
-			toastStore.show({
-				title: __("Error updating currency"),
-				color: "error",
+			const cachedDisplayRate = getCachedExchangeRate({
+				profileName: pos_profile.value.name,
+				company: pos_profile.value.company,
+				fromCurrency: plCurrency,
+				toCurrency: selected_currency.value,
+				date: rateDate,
 			});
+			const cachedConversionRate = getCachedExchangeRate({
+				profileName: pos_profile.value.name,
+				company: pos_profile.value.company,
+				fromCurrency: selected_currency.value,
+				toCurrency: companyCurrency,
+				date: rateDate,
+			});
+			if (cachedDisplayRate?.exchange_rate) {
+				exchange_rate.value = cachedDisplayRate.exchange_rate;
+			}
+			if (selected_currency.value === companyCurrency) {
+				conversion_rate.value = 1;
+			} else if (cachedConversionRate?.exchange_rate) {
+				conversion_rate.value = cachedConversionRate.exchange_rate;
+			}
+			if (
+				!cachedDisplayRate?.exchange_rate &&
+				!(
+					selected_currency.value === companyCurrency ||
+					cachedConversionRate?.exchange_rate
+				)
+			) {
+				toastStore.show({
+					title: __("Error updating currency"),
+					color: "error",
+				});
+			}
 		}
 	};
 
@@ -222,6 +316,7 @@ export function useInvoiceCurrency() {
 
 	const fetch_price_lists = async () => {
 		if (!pos_profile.value) return [];
+		const profileName = pos_profile.value.name;
 
 		if (pos_profile.value.posa_enable_price_list_dropdown) {
 			try {
@@ -253,7 +348,17 @@ export function useInvoiceCurrency() {
 			}
 		} catch (error) {
 			console.error("Failed fetching price list currency", error);
+			const cachedMeta = getCachedPriceListMeta(profileName);
+			if (cachedMeta?.price_list_currency) {
+				price_list_currency.value = cachedMeta.price_list_currency;
+			}
 		}
+
+		savePriceListMetaCache(profileName, {
+			price_lists: price_lists.value,
+			selected_price_list: selected_price_list.value,
+			price_list_currency: price_list_currency.value,
+		});
 
 		return price_lists.value;
 	};

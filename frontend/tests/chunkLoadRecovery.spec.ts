@@ -2,10 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+	buildChunkRecoveryLocation,
 	clearChunkRecoveryState,
 	isDynamicImportFailure,
 	recoverFromChunkLoadError,
 	scheduleAfterStableBoot,
+	scheduleChunkRecoveryStateReset,
 } from "../src/posapp/utils/chunkLoadRecovery";
 
 describe("chunk load recovery helpers", () => {
@@ -29,6 +31,11 @@ describe("chunk load recovery helpers", () => {
 		).toBe(true);
 		expect(
 			isDynamicImportFailure("ChunkLoadError: Loading chunk 12 failed."),
+		).toBe(true);
+		expect(
+			isDynamicImportFailure(
+				"SyntaxError: The requested module './offline/index.js' does not provide an export named 'ag'",
+			),
 		).toBe(true);
 	});
 
@@ -55,6 +62,122 @@ describe("chunk load recovery helpers", () => {
 		expect(
 			window.sessionStorage.getItem("posa_chunk_cache_recovery_once"),
 		).toBe("1");
+	});
+
+	it("keeps retry decisions bounded after the cache recovery path is used", async () => {
+		const chunkError = new TypeError(
+			"Failed to fetch dynamically imported module: /assets/chunk.js",
+		);
+
+		await recoverFromChunkLoadError(chunkError, "first-load");
+		clearChunkRecoveryState();
+		await recoverFromChunkLoadError(chunkError, "after-reload");
+		clearChunkRecoveryState();
+
+		const recovered = await recoverFromChunkLoadError(
+			chunkError,
+			"after-cache-recovery",
+		);
+		clearChunkRecoveryState();
+		const repeated = await recoverFromChunkLoadError(
+			chunkError,
+			"after-terminal",
+		);
+
+		expect(recovered).toBe(false);
+		expect(repeated).toBe(false);
+		expect(
+			window.sessionStorage.getItem("posa_chunk_recovery_terminal"),
+		).toBe("1");
+		expect(
+			window.sessionStorage.getItem("posa_chunk_reload_once"),
+		).toBe("1");
+		expect(
+			window.sessionStorage.getItem("posa_chunk_cache_recovery_once"),
+		).toBe("1");
+	});
+
+	it("uses recovery URL params as durable retry history when storage was cleared", async () => {
+		const chunkError = new TypeError(
+			"Failed to fetch dynamically imported module: /assets/chunk.js",
+		);
+
+		window.history.replaceState(
+			null,
+			"",
+			"/app/posapp?_posa_chunk_reload=1&_posa_chunk_cache_recovery=2",
+		);
+
+		const recovered = await recoverFromChunkLoadError(
+			chunkError,
+			"storage-cleared-after-cache-recovery",
+		);
+
+		expect(recovered).toBe(false);
+		expect(
+			window.sessionStorage.getItem("posa_chunk_recovery_terminal"),
+		).toBe("1");
+		expect(window.location.search).toContain("_posa_chunk_reload=1");
+		expect(window.location.search).toContain(
+			"_posa_chunk_cache_recovery=2",
+		);
+	});
+
+	it("uses the URL reload marker to go directly to cache recovery after storage is cleared", async () => {
+		const chunkError = new TypeError(
+			"Failed to fetch dynamically imported module: /assets/chunk.js",
+		);
+
+		window.history.replaceState(
+			null,
+			"",
+			"/app/posapp?_posa_chunk_reload=1",
+		);
+
+		await recoverFromChunkLoadError(
+			chunkError,
+			"storage-cleared-after-reload",
+		);
+
+		expect(
+			window.sessionStorage.getItem("posa_chunk_cache_recovery_once"),
+		).toBe("1");
+	});
+
+	it("does not clear retry decisions after stable boot", async () => {
+		vi.useFakeTimers();
+		window.sessionStorage.setItem("posa_chunk_reload_once", "1");
+		window.sessionStorage.setItem("posa_chunk_cache_recovery_once", "1");
+		window.sessionStorage.setItem("posa_chunk_recovery_in_progress", "1");
+
+		scheduleChunkRecoveryStateReset();
+		await vi.runAllTimersAsync();
+
+		expect(
+			window.sessionStorage.getItem("posa_chunk_reload_once"),
+		).toBe("1");
+		expect(
+			window.sessionStorage.getItem("posa_chunk_cache_recovery_once"),
+		).toBe("1");
+		expect(
+			window.sessionStorage.getItem("posa_chunk_recovery_in_progress"),
+		).toBeNull();
+	});
+
+	it("builds chunk recovery URLs against the current POS sub-route", () => {
+		expect(
+			buildChunkRecoveryLocation(
+				{
+					pathname: "/app/posapp/payments",
+					search: "?draft=1",
+					hash: "#totals",
+				},
+				"_posa_chunk_reload",
+				55,
+			),
+		).toBe(
+			"/app/posapp/payments?draft=1&_posa_chunk_reload=55#totals",
+		);
 	});
 
 	it("swallows rejected stable-boot tasks to avoid unhandled rejections", async () => {

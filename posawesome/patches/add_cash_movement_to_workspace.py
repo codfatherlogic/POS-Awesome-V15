@@ -54,10 +54,7 @@ def _remove_cash_movement_content(workspace):
     filtered_content = [
         block
         for block in content
-        if not (
-            block.get("type") == "card"
-            and (block.get("data") or {}).get("card_name") == CARD_LABEL
-        )
+        if not (block.get("type") == "card" and (block.get("data") or {}).get("card_name") == CARD_LABEL)
     ]
 
     if len(filtered_content) == len(content):
@@ -76,8 +73,7 @@ def _ensure_workspace_content(workspace):
             content = []
 
     has_cash_card = any(
-        block.get("type") == "card"
-        and (block.get("data") or {}).get("card_name") == CARD_LABEL
+        block.get("type") == "card" and (block.get("data") or {}).get("card_name") == CARD_LABEL
         for block in content
     )
     if has_cash_card:

@@ -25,7 +25,13 @@
 					>
 						{{ __("Connect") }}
 					</v-btn>
-					<v-btn color="secondary" variant="outlined" :loading="loadingPrinters" @click="refreshPrinters">
+					<v-btn
+						color="secondary"
+						variant="outlined"
+						:loading="loadingPrinters"
+						:disabled="loadingPrinters || (qzReconnectPaused && !qzConnected)"
+						@click="refreshPrinters"
+					>
 						{{ __("Refresh Printers") }}
 					</v-btn>
 					<v-btn color="default" variant="text" :disabled="!qzConnected" @click="handleDisconnect">
@@ -43,8 +49,33 @@
 					clearable
 					:disabled="loadingPrinters"
 				/>
+				<div class="d-flex flex-wrap align-center justify-space-between ga-2 mt-3">
+					<div class="text-caption text-medium-emphasis">
+						{{
+							__(
+								"Save the selected printer as the POS Profile default so it shows automatically on this setup.",
+							)
+						}}
+					</div>
+					<v-btn
+						data-test="qz-save-profile-printer"
+						color="primary"
+						variant="tonal"
+						:loading="savingProfilePrinter"
+						:disabled="!selectedPrinter || !profileName"
+						@click="handleSaveProfilePrinter"
+					>
+						{{ __("Save as POS Profile Default") }}
+					</v-btn>
+				</div>
 
-				<v-alert v-if="!selectedPrinter" type="warning" variant="tonal" density="compact" class="mt-3">
+				<v-alert
+					v-if="!selectedPrinter"
+					type="warning"
+					variant="tonal"
+					density="compact"
+					class="mt-3"
+				>
 					{{ __("Select a printer to use QZ silent printing.") }}
 				</v-alert>
 
@@ -85,6 +116,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useToastStore } from "../../stores/toastStore";
+import { useUIStore } from "../../stores/uiStore";
 import {
 	checkQzCertificateOnce,
 	connectQzTray,
@@ -97,6 +129,7 @@ import {
 	qzConnected,
 	qzConnecting,
 	qzPrinters,
+	qzReconnectPaused,
 	selectedQzPrinter,
 	setSelectedQzPrinter,
 	setupQzCertificate,
@@ -112,8 +145,10 @@ const emit = defineEmits<{
 }>();
 
 const toastStore = useToastStore();
+const uiStore = useUIStore();
 const loadingPrinters = ref(false);
 const certificateLoading = ref(false);
+const savingProfilePrinter = ref(false);
 
 const dialogModel = computed({
 	get: () => props.modelValue,
@@ -132,6 +167,20 @@ const printerOptions = computed(() =>
 	})),
 );
 
+const currentProfile = computed(() => {
+	const profile =
+		uiStore?.posProfile && typeof uiStore.posProfile === "object" && "value" in uiStore.posProfile
+			? uiStore.posProfile.value
+			: uiStore?.posProfile;
+
+	return profile && typeof profile === "object" ? profile : null;
+});
+
+const profileName = computed(() => {
+	const name = currentProfile.value?.name;
+	return typeof name === "string" ? name.trim() : "";
+});
+
 const certAlertType = computed(() => {
 	if (qzCertStatus.value === "trusted") return "success";
 	if (qzCertStatus.value === "untrusted") return "error";
@@ -145,6 +194,9 @@ const connectionStatusText = computed(() => {
 	if (qzConnected.value) {
 		return __("QZ Tray connected.");
 	}
+	if (qzReconnectPaused.value) {
+		return __("QZ Tray is manually disconnected. Press Connect to enable it again.");
+	}
 	return __("QZ Tray is not connected.");
 });
 
@@ -156,9 +208,7 @@ const certificateStatusText = computed(() => {
 	if (status === "untrusted") {
 		return __("Certificate is missing or not trusted. QZ may show confirmation dialogs.");
 	}
-	return __(
-		"Generate and install the certificate to allow fully silent printing without trust prompts.",
-	);
+	return __("Generate and install the certificate to allow fully silent printing without trust prompts.");
 });
 
 function __(text: string, args?: string[]) {
@@ -174,7 +224,7 @@ function notify(title: string, color = "info") {
 
 async function handleConnect(showNotification = true) {
 	try {
-		const connected = await connectQzTray();
+		const connected = await connectQzTray({ userInitiated: true });
 		if (!connected) {
 			if (showNotification) {
 				notify("Could not connect to QZ Tray.", "warning");
@@ -201,10 +251,17 @@ async function handleConnect(showNotification = true) {
 
 async function handleDisconnect() {
 	await disconnectQzTray();
-	notify("QZ Tray disconnected.", "info");
+	notify("QZ Tray disconnected. Auto-connect is paused until you press Connect.", "info");
 }
 
 async function refreshPrinters(showNotification = true) {
+	if (qzReconnectPaused.value && !qzConnected.value) {
+		if (showNotification) {
+			notify("QZ Tray is manually disconnected. Press Connect to enable it again.", "warning");
+		}
+		return;
+	}
+
 	loadingPrinters.value = true;
 	try {
 		const printers = await findQzPrinters();
@@ -225,6 +282,44 @@ async function refreshPrinters(showNotification = true) {
 		);
 	} finally {
 		loadingPrinters.value = false;
+	}
+}
+
+async function handleSaveProfilePrinter() {
+	if (!selectedPrinter.value) {
+		notify("Select a printer before saving it to the POS Profile.", "warning");
+		return;
+	}
+	if (!profileName.value) {
+		notify("POS Profile is not loaded yet. Try again in a moment.", "warning");
+		return;
+	}
+
+	try {
+		savingProfilePrinter.value = true;
+		const response = await frappe.call({
+			method: "frappe.client.set_value",
+			args: {
+				doctype: "POS Profile",
+				name: profileName.value,
+				fieldname: "posa_qz_printer_name",
+				value: selectedPrinter.value,
+			},
+		});
+		const updatedProfile = {
+			...(currentProfile.value || {}),
+			...(response?.message && typeof response.message === "object" ? response.message : {}),
+			posa_qz_printer_name: selectedPrinter.value,
+		};
+		if (typeof uiStore?.setPosProfile === "function") {
+			uiStore.setPosProfile(updatedProfile as any);
+		}
+		notify("Selected printer saved as the POS Profile default.", "success");
+	} catch (error: any) {
+		console.error("Failed to save QZ profile printer", error);
+		notify(error?.message || "Failed to save POS Profile printer.", "error");
+	} finally {
+		savingProfilePrinter.value = false;
 	}
 }
 
@@ -275,7 +370,7 @@ watch(
 	async (open) => {
 		if (!open) return;
 		await checkQzCertificateOnce();
-		if (!qzConnected.value) {
+		if (!qzConnected.value && !qzReconnectPaused.value) {
 			await handleConnect(false);
 		}
 		if (qzConnected.value && !qzPrinters.value.length) {

@@ -45,7 +45,9 @@
 						<td :colspan="items_headers.length">
 							<v-row class="mt-2">
 								<v-col v-if="item.description">
-									<div class="text-primary" v-html="handleNewLine(item.description)"></div>
+									<div class="text-primary posa-offer-description">
+										{{ item.description }}
+									</div>
 								</v-col>
 								<v-col v-if="item.offer == 'Give Product'">
 									<v-autocomplete
@@ -210,9 +212,7 @@ export default {
 			);
 			const toRemove = [];
 			this.pos_offers.forEach((pos_offer) => {
-				const offer = incoming.find(
-					(offer) => this.getOfferId(offer) === this.getOfferId(pos_offer),
-				);
+				const offer = incoming.find((offer) => this.getOfferId(offer) === this.getOfferId(pos_offer));
 				if (!offer) {
 					toRemove.push(this.getOfferId(pos_offer));
 				}
@@ -275,23 +275,12 @@ export default {
 			});
 		},
 		removeOffers(offers_id_list) {
-			const normalized = new Set(
-				(offers_id_list || []).map((id) => this.normalizeOfferRowId(id)),
-			);
-			this.pos_offers = this.pos_offers.filter(
-				(offer) => !normalized.has(this.getOfferId(offer)),
-			);
+			const normalized = new Set((offers_id_list || []).map((id) => this.normalizeOfferRowId(id)));
+			this.pos_offers = this.pos_offers.filter((offer) => !normalized.has(this.getOfferId(offer)));
 		},
 		handelOffers() {
 			const applyedOffers = this.pos_offers.filter((offer) => offer.offer_applied);
 			this.eventBus.emit("update_invoice_offers", applyedOffers);
-		},
-		handleNewLine(str) {
-			if (str) {
-				return str.replace(/(?:\r\n|\r|\n)/g, "<br />");
-			} else {
-				return "";
-			}
 		},
 		get_give_items(offer) {
 			if (offer.apply_type === "Item Code") {
@@ -392,3 +381,9 @@ export default {
 	},
 };
 </script>
+
+<style scoped>
+.posa-offer-description {
+	white-space: pre-line;
+}
+</style>

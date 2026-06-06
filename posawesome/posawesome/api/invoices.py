@@ -13,7 +13,7 @@ from posawesome.posawesome.api.invoice_processing.utils import (
     _validate_return_window,
     get_latest_rate,
     get_price_list_currency,
-    get_available_currencies
+    get_available_currencies,
 )
 from posawesome.posawesome.api.invoice_processing.stock import (
     _strip_client_freebies_from_payload,
@@ -23,29 +23,35 @@ from posawesome.posawesome.api.invoice_processing.stock import (
     _merge_duplicate_taxes,
     _auto_set_return_batches,
     _collect_stock_errors,
-    _should_block
+    _should_block,
 )
 from posawesome.posawesome.api.invoice_processing.creation import (
     update_invoice,
     submit_invoice,
     submit_in_background_job,
-    validate_cart_items
+    repair_invoice_submission,
+    validate_cart_items,
 )
 from posawesome.posawesome.api.invoice_processing.returns import (
     search_invoices_for_return,
     validate_return_items,
     get_invoice_for_return,
 )
-from posawesome.posawesome.api.invoice_processing.payment import (
-    _create_change_payment_entries
-)
-from posawesome.posawesome.api.invoice_processing.data import (
-    get_last_invoice_rates
-)
+from posawesome.posawesome.api.invoice_processing.payment import _create_change_payment_entries
+from posawesome.posawesome.api.invoice_processing.data import get_last_invoice_rates
 from posawesome.posawesome.api.utils import log_perf_event
 
+
 @frappe.whitelist()
-def get_draft_invoices(pos_opening_shift, doctype="Sales Invoice", limit_page_length=0):
+def get_draft_invoices(
+    pos_opening_shift=None,
+    doctype="Sales Invoice",
+    limit_page_length=0,
+    company=None,
+    pos_profile=None,
+    cashier=None,
+    is_supervisor=0,
+):
     started_at = time.perf_counter()
     try:
         limit_page_length = int(limit_page_length or 0)
@@ -54,10 +60,18 @@ def get_draft_invoices(pos_opening_shift, doctype="Sales Invoice", limit_page_le
     if limit_page_length < 0:
         limit_page_length = 0
 
+    supervisor_scope = int(is_supervisor or 0)
     filters = {
-        "posa_pos_opening_shift": pos_opening_shift,
         "docstatus": 0,
     }
+    if supervisor_scope and company:
+        filters["company"] = company
+        if pos_profile:
+            filters["pos_profile"] = pos_profile
+        if cashier:
+            filters["owner"] = cashier
+    else:
+        filters["posa_pos_opening_shift"] = pos_opening_shift
     if frappe.db.has_column(doctype, "posa_is_printed"):
         filters["posa_is_printed"] = 0
 
@@ -72,6 +86,9 @@ def get_draft_invoices(pos_opening_shift, doctype="Sales Invoice", limit_page_le
             "posting_time",
             "grand_total",
             "currency",
+            "pos_profile",
+            "owner",
+            "modified_by",
         ],
         limit_page_length=limit_page_length,
         order_by="modified desc",
@@ -100,9 +117,12 @@ def get_draft_invoice_doc(invoice_name, doctype="Sales Invoice"):
     )
     return doc
 
+
 @frappe.whitelist()
 def delete_invoice(invoice):
     from frappe import _
+    from posawesome.posawesome.api.invoice import delete_invoice_submission_ledger_entries_for_invoice
+
     doctype = "Sales Invoice"
     if frappe.db.exists("POS Invoice", invoice):
         doctype = "POS Invoice"
@@ -115,6 +135,7 @@ def delete_invoice(invoice):
         frappe.throw(_("This invoice {0} cannot be deleted").format(invoice))
 
     frappe.delete_doc(doctype, invoice, force=1)
+    delete_invoice_submission_ledger_entries_for_invoice(doctype, invoice)
     return _("Invoice {0} Deleted").format(invoice)
 
 

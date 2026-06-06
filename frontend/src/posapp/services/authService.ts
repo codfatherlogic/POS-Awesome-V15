@@ -1,8 +1,9 @@
 import api from "./api";
+import type { ApiEnvelope } from "./api";
 
 const authService = {
-	logout(): Promise<any> {
-		return api.call("logout");
+	logout(): Promise<ApiEnvelope<any>> {
+		return api.callEnvelope("logout");
 	},
 
 	getUser(): string | null {
@@ -10,7 +11,7 @@ const authService = {
 			return frappe.session.user;
 		}
 		return null;
-	}
+	},
 };
 
 export default authService;

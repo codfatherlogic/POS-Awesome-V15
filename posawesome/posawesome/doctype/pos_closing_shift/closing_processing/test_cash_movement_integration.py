@@ -26,7 +26,9 @@ class DummyClosingShift:
 class TestClosingShiftCashMovementIntegration(unittest.TestCase):
     @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.get_payments_entries")
     @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.get_pos_invoices")
-    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.submit_printed_invoices")
+    @patch(
+        "posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.submit_printed_invoices"
+    )
     @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.frappe")
     def test_make_closing_shift_deducts_cash_movements_from_cash_expected(
         self,
@@ -57,8 +59,9 @@ class TestClosingShiftCashMovementIntegration(unittest.TestCase):
 
         result = creation.make_closing_shift_from_opening(json.dumps(opening_shift))
 
-        self.assertEqual(result, closing_doc)
-        payment_rows = result.tables.get("payment_reconciliation") or []
+        self.assertEqual(result["closing_shift"], closing_doc)
+        self.assertEqual(result["skipped_printed_invoices"], [])
+        payment_rows = closing_doc.tables.get("payment_reconciliation") or []
         self.assertEqual(len(payment_rows), 1)
         row = payment_rows[0]
         self.assertEqual(row.mode_of_payment, "Cash")

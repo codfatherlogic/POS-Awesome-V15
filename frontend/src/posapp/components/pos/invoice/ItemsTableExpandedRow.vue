@@ -92,8 +92,7 @@
 									calcPrices(item, $event.target.value, $event),
 								]"
 								:disabled="
-									!pos_profile.posa_allow_user_to_edit_rate ||
-									!!item.posa_is_replace
+									!pos_profile.posa_allow_user_to_edit_rate || !!item.posa_is_replace
 								"
 								prepend-inner-icon="mdi-currency-usd"
 							></v-text-field>
@@ -354,7 +353,7 @@
 						<div class="posa-form-field">
 							<v-autocomplete
 								v-model="item.batch_no"
-								:items="item.batch_no_data"
+								:items="getBatchOptions(item)"
 								item-title="batch_no"
 								variant="outlined"
 								density="compact"
@@ -367,15 +366,13 @@
 							>
 								<template v-slot:item="{ props, item }">
 									<v-list-item v-bind="props">
-										<v-list-item-title v-html="getRaw(item).batch_no"></v-list-item-title>
+										<v-list-item-title>{{ getRaw(item).batch_no }}</v-list-item-title>
 										<v-list-item-subtitle class="d-flex align-center">
-											<span
-												v-html="
-													`Available QTY  '${
-														getRaw(item).available_qty ?? getRaw(item).batch_qty
-													}' - Expiry Date ${getRaw(item).expiry_date}`
-												"
-											></span>
+											<span>{{
+												`Available QTY ${
+													getRaw(item).available_qty ?? getRaw(item).batch_qty
+												} - Expiry Date ${getRaw(item).expiry_date}`
+											}}</span>
 											<v-chip
 												v-if="getRaw(item).is_expired"
 												color="error"
@@ -431,6 +428,7 @@
 </template>
 
 <script setup lang="ts">
+import { getDisplayableBatchOptions } from "../../../composables/pos/shared/useBatchSerial";
 import type { CartItem, POSProfile, InvoiceDoc } from "../../../types/models";
 
 interface Props {
@@ -475,6 +473,7 @@ const onQtyChange = (item: CartItem, event: any) => {
 };
 
 const getRaw = (item: any) => item?.raw || {};
+const getBatchOptions = (item: any) => getDisplayableBatchOptions(item?.batch_no_data);
 </script>
 
 <style scoped>

@@ -1,6 +1,8 @@
 import {
 	getStoredCustomer,
 	getCachedPriceListItems,
+	setCustomerStorage,
+	saveStoredValueSnapshot,
 } from "../../../../offline/index";
 
 declare const frappe: any;
@@ -26,7 +28,14 @@ export async function fetch_customer_details(context: any) {
 
 		const r = await frappe.call({
 			method: "posawesome.posawesome.api.customers.get_customer_info",
-			args: { customer },
+			args: {
+				customer,
+				company:
+					context?.pos_profile?.company ||
+					context?.company?.name ||
+					context?.company ||
+					null,
+			},
 		});
 
 		if (
@@ -35,6 +44,22 @@ export async function fetch_customer_details(context: any) {
 			context.customer.trim() === requestedCustomer
 		) {
 			context.customer_info = r.message;
+			await setCustomerStorage([r.message]);
+			if (context?.pos_profile?.company) {
+				const totalCredit = Number(r.message?.stored_value_balance || 0);
+				saveStoredValueSnapshot(
+					customer,
+					context.pos_profile.company,
+					totalCredit > 0 ? [
+						{
+							type: "Snapshot",
+							credit_origin: "offline-customer-cache",
+							total_credit: totalCredit,
+							source_type: "Stored Value Snapshot",
+						},
+					] : [],
+				);
+			}
 			const resolvedPriceList =
 				context.customer_info.customer_price_list ||
 				context.customer_info.customer_group_price_list ||

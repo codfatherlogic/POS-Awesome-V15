@@ -29,6 +29,23 @@
 			></v-text-field>
 		</v-col>
 
+		<v-col v-if="invoice_doc && giftCardAppliedAmount > 0" cols="12">
+			<div class="payment-summary-pill payment-summary-pill--gift-card">
+				<div class="payment-summary-pill__copy">
+					<p class="payment-summary-pill__label">{{ frappe._("Gift Card Applied") }}</p>
+					<h4 class="payment-summary-pill__amount">
+						{{ formatCurrency(giftCardAppliedAmount) }}
+					</h4>
+					<p class="payment-summary-pill__meta">
+						{{ giftCardCode || frappe._("Gift card") }}
+						<span class="payment-summary-pill__dot">•</span>
+						{{ frappe._("Included in settlement") }}
+					</p>
+				</div>
+				<span class="payment-summary-pill__state">{{ frappe._("Applied") }}</span>
+			</div>
+		</v-col>
+
 		<!-- Paid Change (if applicable) -->
 		<v-col cols="12" sm="7" v-if="invoice_doc && change_due > 0 && !invoice_doc.is_return">
 			<v-text-field
@@ -64,17 +81,29 @@
 </template>
 
 <script setup>
-defineProps({
+const props = defineProps({
 	invoice_doc: Object,
 	total_payments_display: String,
 	diff_payment_display: String,
 	diff_label: String,
+	diffPayment: {
+		type: Number,
+		default: 0,
+	},
 	change_due: Number,
 	paid_change: Number,
 	credit_change: Number,
 	paid_change_rules: Array,
 	currencySymbol: Function,
 	formatCurrency: Function,
+	giftCardAppliedAmount: {
+		type: Number,
+		default: 0,
+	},
+	giftCardCode: {
+		type: String,
+		default: "",
+	},
 });
 
 defineEmits(["show-paid-amount", "show-diff-payment", "show-paid-change", "update-credit-change"]);
@@ -96,5 +125,63 @@ const frappe = window.frappe;
 .payment-summary-grid :deep(.v-field) {
 	border-radius: var(--pos-radius-sm);
 	background: var(--pos-surface-raised);
+}
+
+.payment-summary-pill {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--pos-space-3);
+	padding: 14px 16px;
+	border-radius: var(--pos-radius-md);
+	background:
+		linear-gradient(
+			180deg,
+			rgba(var(--v-theme-success), 0.1) 0%,
+			rgba(var(--v-theme-success), 0.04) 100%
+		),
+		var(--pos-surface-raised);
+	border: 1px solid rgba(var(--v-theme-success), 0.18);
+}
+
+.payment-summary-pill__copy {
+	min-width: 0;
+}
+
+.payment-summary-pill__label {
+	margin: 0;
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--pos-text-secondary);
+}
+
+.payment-summary-pill__amount {
+	margin: 4px 0 0;
+	font-size: 1.05rem;
+	font-weight: 700;
+	color: var(--pos-text-primary);
+}
+
+.payment-summary-pill__meta {
+	margin: 6px 0 0;
+	font-size: 0.82rem;
+	color: var(--pos-text-secondary);
+}
+
+.payment-summary-pill__dot {
+	margin: 0 6px;
+}
+
+.payment-summary-pill__state {
+	display: inline-flex;
+	align-items: center;
+	padding: 6px 10px;
+	border-radius: 999px;
+	background: rgba(var(--v-theme-success), 0.12);
+	color: rgb(var(--v-theme-success));
+	font-size: 0.74rem;
+	font-weight: 700;
 }
 </style>

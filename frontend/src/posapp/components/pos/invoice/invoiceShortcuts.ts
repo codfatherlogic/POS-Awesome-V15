@@ -105,10 +105,7 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			if (key === "F4") {
 				consumeEvent(event);
-				this.toastStore.show({
-					title: __("Profile switching is not available yet"),
-					color: "warning",
-				});
+				this.eventBus.emit("open_employee_switch");
 				return;
 			}
 
@@ -127,10 +124,7 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			if (key === "F8") {
 				consumeEvent(event);
-				this.toastStore.show({
-					title: __("POS lock is not available yet"),
-					color: "warning",
-				});
+				this.eventBus.emit("lock_pos_screen");
 				return;
 			}
 

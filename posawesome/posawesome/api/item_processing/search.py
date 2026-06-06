@@ -21,6 +21,7 @@ from posawesome.posawesome.api.utils import (
 from posawesome.posawesome.api.item_processing.barcode import search_serial_or_batch_or_barcode_number
 from posawesome.posawesome.api.item_processing.details import get_items_details
 
+
 @dataclass(frozen=True)
 class ProfileContext:
     """Container describing the active POS profile and caching metadata."""
@@ -68,7 +69,6 @@ def normalize_brand(brand: str) -> str:
     return cstr(brand).strip().lower()
 
 
-
 def _to_positive_int(value: Any) -> Optional[int]:
     """Convert the input to a non-negative integer if possible."""
 
@@ -77,7 +77,6 @@ def _to_positive_int(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return integer if integer >= 0 else None
-
 
 
 def _build_search_plan(
@@ -189,6 +188,7 @@ def _build_search_plan(
 
     fields = [
         "name",
+        "modified",
         "item_code",
         "item_name",
         "stock_uom",
@@ -344,7 +344,9 @@ def _build_attribute_maps(
     if not plan.posa_show_template_items or not items_data:
         return {}, {}
 
-    template_names = [item.get("name") for item in items_data if item.get("has_variants") and item.get("name")]
+    template_names = [
+        item.get("name") for item in items_data if item.get("has_variants") and item.get("name")
+    ]
     variant_names = [item.get("name") for item in items_data if item.get("variant_of") and item.get("name")]
 
     template_attributes_map: Dict[str, List[Dict[str, Any]]] = {}
@@ -375,11 +377,7 @@ def _build_attribute_maps(
                 attr_docs[doc.get("name")] = doc
 
         for parent, attrs in attrs_by_parent.items():
-            template_attributes_map[parent] = [
-                attr_docs[attr]
-                for attr in sorted(attrs)
-                if attr in attr_docs
-            ]
+            template_attributes_map[parent] = [attr_docs[attr] for attr in sorted(attrs) if attr in attr_docs]
 
     if variant_names:
         variant_rows = frappe.get_all(
@@ -443,7 +441,7 @@ def _run_item_query(
 
         details = get_items_details(
             json.dumps(pos_profile),
-            json.dumps(items_data),
+            as_json(items_data),
             price_list=price_list,
             customer=customer,
         )

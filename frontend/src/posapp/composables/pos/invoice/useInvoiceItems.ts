@@ -1,3 +1,35 @@
+/**
+ * Cart item management: column preferences, quantity editing, and delivery charges.
+ *
+ * **Column visibility**
+ * `available_columns` lists every possible cart table column. `selected_columns`
+ * is the operator-chosen subset, persisted to `localStorage` under the key
+ * `posawesome_selected_columns`. The computed `items_headers` merges required
+ * columns with the operator selection. `loadColumnPreferences` applies profile
+ * defaults when no saved preference exists; `saveColumnPreferences` writes back
+ * on every change.
+ *
+ * **Quantity editing (`setFormatedQty`)**
+ * The central quantity setter enforces several layered rules in order:
+ * 1. Clamps to `_offer_constraints.max_qty` for offer lines.
+ * 2. Enforces stock ceiling when `posa_validate_stock` is enabled, with a
+ *    "block vs. warn" branch controlled by `posa_block_sale_beyond_available_qty`
+ *    and `allow_negative_stock`.
+ * 3. Forces negative sign on return invoices.
+ * After setting qty it calls `calc_stock_qty` and, for bundles,
+ * `updateBundleChildrenQty`. It emits `apply_pricing_rules` on the bus.
+ *
+ * **Increment / decrement helpers**
+ * `add_one` and `subtract_one` mirror the sign of the current qty so they work
+ * correctly on return lines. Both remove the item automatically when qty would
+ * reach zero. `blockSaleBeyondAvailableQty` is disabled for Order/Quotation types.
+ *
+ * **Delivery charges**
+ * `fetch_delivery_charges(customer)` calls the server and caches results via
+ * `saveDeliveryChargesCache`. On failure `getCachedDeliveryCharges` is used.
+ * Three watchers keep `invoiceStore` in sync with the local delivery charge refs
+ * so the customer display panel always reflects the current selection.
+ */
 import { ref, computed, watch } from "vue";
 import type { Ref } from "vue";
 import { useInvoiceStore } from "../../../stores/invoiceStore";
@@ -6,16 +38,16 @@ import { useUIStore } from "../../../stores/uiStore";
 import { useStockUtils } from "../shared/useStockUtils";
 import { useItemAddition } from "../items/useItemAddition";
 import { parseBooleanSetting } from "../../../utils/stock";
+import {
+	getCachedDeliveryCharges,
+	saveDeliveryChargesCache,
+} from "../../../../offline/index";
 import format from "../../../format";
 import { bus } from "../../../bus";
 
 // @ts-ignore
 const __ = window.__ || ((s) => s);
 
-/**
- * useInvoiceItems Composable
- * Manages invoice items, validation, quantities, and table headers.
- */
 export function useInvoiceItems(invoiceType: Ref<string>) {
 	const invoiceStore = useInvoiceStore();
 	const toastStore = useToastStore();
@@ -62,7 +94,7 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 		},
 		{
 			title: __("Discount %"),
-			key: "discount_value",
+			key: "discount_percentage",
 			align: "end",
 			required: false,
 		},
@@ -100,7 +132,11 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 		try {
 			const saved = localStorage.getItem("posawesome_selected_columns");
 			if (saved) {
-				selected_columns.value = JSON.parse(saved);
+				const parsed: string[] = JSON.parse(saved);
+				// Migrate old "discount_value" key (renamed to "discount_percentage")
+				selected_columns.value = parsed.map((key) =>
+					key === "discount_value" ? "discount_percentage" : key,
+				);
 			} else if (pos_profile.value) {
 				// Default selection based on POS Profile
 				selected_columns.value = available_columns.value
@@ -108,7 +144,7 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 						if (col.required) return true;
 						if (col.key === "price_list_rate") return true;
 						if (
-							col.key === "discount_value" &&
+							col.key === "discount_percentage" &&
 							pos_profile.value?.posa_display_discount_percentage
 						)
 							return true;
@@ -173,7 +209,8 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 	const shouldEnforceStockLimits = (item: any) => {
 		if (
 			pos_profile.value &&
-			!parseBooleanSetting(pos_profile.value.posa_validate_stock)
+			!parseBooleanSetting(pos_profile.value.posa_validate_stock) &&
+			!blockSaleBeyondAvailableQty.value
 		) {
 			return false;
 		}
@@ -187,6 +224,74 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 			return false;
 		}
 		return true;
+	};
+
+	const resolveItemMaxQty = (item: any) => {
+		if (!item || item.is_stock_item === 0 || item.is_stock_item === false) {
+			return undefined;
+		}
+		if (item.max_qty !== undefined && Number.isFinite(Number(item.max_qty))) {
+			return flt(Number(item.max_qty), null);
+		}
+
+		const baseQty = Number(
+			item._base_actual_qty ??
+				item._base_available_qty ??
+				item.actual_qty ??
+				item.available_qty,
+		);
+		if (!Number.isFinite(baseQty)) {
+			return undefined;
+		}
+
+		const conversionFactor = Number(item.conversion_factor || 1) || 1;
+		const maxQty = flt(baseQty / conversionFactor, null);
+		item.max_qty = maxQty;
+		return maxQty;
+	};
+
+	const refreshQuantityLimitState = (item: any) => {
+		if (!item) return;
+		if (item.is_stock_item === 0 || item.is_stock_item === false) {
+			item.disable_increment = false;
+			return;
+		}
+
+		const maxQty = resolveItemMaxQty(item);
+		const allowNegativeStock =
+			(parseBooleanSetting(stock_settings.value?.allow_negative_stock) ||
+				parseBooleanSetting(item?.allow_negative_stock)) &&
+			!blockSaleBeyondAvailableQty.value;
+
+		if (allowNegativeStock || maxQty === undefined) {
+			item.disable_increment = false;
+			return;
+		}
+
+		const enforceStockLimits = shouldEnforceStockLimits(item);
+		item.disable_increment =
+			enforceStockLimits && flt(item.qty, null) >= flt(maxQty, null);
+	};
+
+	const syncLineAmounts = (item: any) => {
+		if (!item) return;
+		const qty = Number.parseFloat(String(item.qty ?? 0)) || 0;
+		const rate = Number.parseFloat(String(item.rate ?? 0)) || 0;
+		const baseRate =
+			Number.parseFloat(String(item.base_rate ?? item.rate ?? 0)) || 0;
+		item.amount = flt(qty * rate, null);
+		item.base_amount = flt(qty * baseRate, null);
+	};
+
+	const notifyCartLineChanged = () => {
+		if (typeof invoiceStore.recalculateTotals === "function") {
+			invoiceStore.recalculateTotals();
+		} else if (typeof invoiceStore.triggerUpdateTotals === "function") {
+			invoiceStore.triggerUpdateTotals();
+		}
+		if (typeof invoiceStore.touch === "function") {
+			invoiceStore.touch();
+		}
 	};
 
 	const setFormatedQty = (
@@ -236,33 +341,27 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 			(parseBooleanSetting(stock_settings.value?.allow_negative_stock) ||
 				parseBooleanSetting(item?.allow_negative_stock)) &&
 			!blockSaleBeyondAvailableQty.value;
+		const maxQty =
+			field_name === "qty" && enforceStockLimits
+				? resolveItemMaxQty(item)
+				: item.max_qty;
 
 		if (
 			enforceStockLimits &&
-			item.max_qty !== undefined &&
+			maxQty !== undefined &&
+			!allowNegativeStock &&
 			flt(item[field_name], effectivePrecision) >
-				flt(item.max_qty, effectivePrecision)
+				flt(maxQty, effectivePrecision)
 		) {
-			const blockSale =
-				blockSaleBeyondAvailableQty.value || !allowNegativeStock;
-			if (blockSale) {
-				item[field_name] = item.max_qty;
-				parsedValue = item.max_qty;
-				toastStore.show({
-					title: __(
-						"Maximum available quantity is {0}. Quantity adjusted to match stock.",
-						[formatFloat(item.max_qty, effectivePrecision)],
-					),
-					color: "error",
-				});
-			} else {
-				toastStore.show({
-					title: __(
-						"Stock is lower than requested. Proceeding may create negative stock.",
-					),
-					color: "warning",
-				});
-			}
+			item[field_name] = maxQty;
+			parsedValue = maxQty;
+			toastStore.show({
+				title: __(
+					"Maximum available quantity is {0}. Quantity adjusted to match stock.",
+					[formatFloat(maxQty, effectivePrecision)],
+				),
+				color: "error",
+			});
 		}
 
 		if (isReturnInvoice.value && parsedValue > 0) {
@@ -270,12 +369,18 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 			item[field_name] = parsedValue;
 		}
 
+		if (field_name === "qty") {
+			refreshQuantityLimitState(item);
+		}
+
 		if (typeof calc_stock_qty === "function")
 			calc_stock_qty(item, item[field_name]);
 		if (field_name === "qty") updateBundleChildrenQty(item);
 
 		if (field_name === "qty") {
+			syncLineAmounts(item);
 			bus.emit("apply_pricing_rules");
+			notifyCartLineChanged();
 		}
 
 		return parsedValue;
@@ -366,9 +471,21 @@ export function useInvoiceItems(invoiceType: Ref<string>) {
 			});
 			if (r.message) {
 				delivery_charges.value = r.message;
+				saveDeliveryChargesCache(
+					pos_profile.value.name,
+					customer,
+					r.message,
+				);
 			}
 		} catch (error) {
 			console.error("Failed to fetch delivery charges", error);
+			const cachedCharges = getCachedDeliveryCharges(
+				pos_profile.value.name,
+				customer,
+			);
+			delivery_charges.value = Array.isArray(cachedCharges)
+				? cachedCharges
+				: [];
 		}
 	};
 

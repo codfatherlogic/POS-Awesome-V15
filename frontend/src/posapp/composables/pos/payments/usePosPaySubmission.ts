@@ -1,5 +1,6 @@
 import { ref, type Ref } from "vue";
 import { isOffline, saveOfflinePayment } from "../../../../offline/index";
+import { ensurePaymentClientRequestId } from "../../../../offline/idempotency";
 
 declare const frappe: any;
 declare const __: (_text: string, _args?: any[]) => string;
@@ -7,11 +8,17 @@ declare const flt: (_value: unknown, _precision?: number) => number;
 
 type PosPaySubmissionArgs = {
 	customerName: Ref<string>;
+	partyName?: Ref<string>;
+	partyType?: Ref<string>;
+	paymentType?: Ref<string>;
 	company: Ref<any>;
 	posProfile: Ref<any>;
 	posOpeningShift: Ref<any>;
+	postingDate?: Ref<string | null>;
 	exchangeRate: Ref<number>;
 	invoiceTotalCurrency: Ref<string>;
+	referenceNo: Ref<string>;
+	referenceDate: Ref<string>;
 	autoAllocatePaymentAmount: Ref<boolean>;
 	payment_methods: Ref<any[]>;
 	selected_invoices: Ref<any[]>;
@@ -36,11 +43,17 @@ type PosPaySubmissionArgs = {
 
 export function usePosPaySubmission({
 	customerName,
+	partyName,
+	partyType,
+	paymentType,
 	company,
 	posProfile,
 	posOpeningShift,
+	postingDate,
 	exchangeRate,
 	invoiceTotalCurrency,
+	referenceNo,
+	referenceDate,
 	autoAllocatePaymentAmount,
 	payment_methods,
 	selected_invoices,
@@ -67,21 +80,31 @@ export function usePosPaySubmission({
 		if (isSubmitting.value) return;
 
 		isSubmitting.value = true;
-		const customer = customerName.value;
+		const party = partyName?.value || customerName.value;
+		const resolvedPartyType = partyType?.value || "Customer";
+		const resolvedPaymentType = paymentType?.value || "Receive";
+		const resolvedPostingDate = postingDate?.value || null;
+		const resolvedReferenceNo =
+			referenceNo?.value?.trim() || posOpeningShift.value?.name || null;
+		const resolvedReferenceDate =
+			referenceDate?.value?.trim() || resolvedPostingDate || null;
 
 		const finalizeSubmission = () => {
 			clearSelections();
 			resetPaymentMethodAmounts();
-			customerName.value = customer;
+			referenceNo.value = "";
+			referenceDate.value = "";
+			customerName.value = party;
 			get_outstanding_invoices();
 			get_unallocated_payments();
 			set_mpesa_search_params();
 			get_draft_mpesa_payments_register();
+			eventBus.emit("payment-submitted");
 		};
 
 		try {
-			if (!customer) {
-				frappe.throw(__("Please select a customer"));
+			if (!party) {
+				frappe.throw(__("Please select a party"));
 			}
 
 			const total_payments =
@@ -90,7 +113,7 @@ export function usePosPaySubmission({
 				total_payment_methods.value;
 
 			if (total_payments <= 0) {
-				frappe.throw(__("Please make a payment or select an payment"));
+				frappe.throw(__("Please make a payment or select a payment"));
 			}
 
 			const hasNewPayments = flt(total_payment_methods.value) > 0;
@@ -117,17 +140,28 @@ export function usePosPaySubmission({
 					0,
 				);
 
-			const payload = {
-				customer,
-				company: company.value,
-				currency: invoiceTotalCurrency.value,
-				exchange_rate: exchangeRate.value || null,
-				pos_opening_shift_name: posOpeningShift.value.name,
-				pos_profile_name: posProfile.value.name,
-				pos_profile: posProfile.value,
-				payment_methods: payment_methods.value.filter(
-					(m: any) => flt(m.amount) > 0,
-				),
+		const payload = {
+			customer: party,
+			party,
+			party_type: resolvedPartyType,
+			payment_type: resolvedPaymentType,
+			company: company.value,
+			currency: invoiceTotalCurrency.value,
+			posting_date: resolvedPostingDate,
+			exchange_rate: exchangeRate.value || null,
+			reference_no: resolvedReferenceNo,
+			reference_date: resolvedReferenceDate,
+			pos_opening_shift_name: posOpeningShift.value.name,
+			pos_profile_name: posProfile.value.name,
+			pos_profile: posProfile.value,
+			payment_methods: payment_methods.value
+				.filter((m: any) => flt(m.amount) > 0)
+				.map((m: any) => ({
+					mode_of_payment: m.mode_of_payment,
+					amount: m.amount,
+					row_id: m.row_id,
+					bank_account: m.bank_account || null,
+				})),
 				selected_invoices: selectedInvoicesForPayload,
 				selected_payments: selected_payments.value,
 				total_selected_invoices: flt(totalSelectedInvoicesAmount),
@@ -139,10 +173,11 @@ export function usePosPaySubmission({
 					total_selected_mpesa_payments.value,
 				),
 			};
+			ensurePaymentClientRequestId(payload);
 
 			if (isOffline()) {
 				try {
-					saveOfflinePayment({ args: { payload } });
+					await saveOfflinePayment({ args: { payload } });
 					eventBus.emit("show_message", {
 						title: __("Payment saved offline"),
 						color: "warning",
@@ -173,6 +208,20 @@ export function usePosPaySubmission({
 			}
 
 			frappe.utils.play_sound("submit");
+
+			// Show exchange gain/loss notification as toast (non-intrusive)
+			if (response.message?.net_gain_loss) {
+				const netAmount = response.message.net_gain_loss;
+				const currency = response.message.exchange_gain_loss_summary?.[0]?.currency || '';
+				const label = netAmount >= 0 ? __("Gain") : __("Loss");
+
+				// Use toast notification (auto-dismiss)
+				eventBus.emit("show_notification", {
+					message: __("{0}: {1} {2}", [label, Math.abs(netAmount).toFixed(2), currency]),
+					type: netAmount >= 0 ? "success" : "warning",
+					duration: 4000,
+				});
+			}
 
 			if (autoAllocatePaymentAmount.value) {
 				const autoReconcileResult = await autoReconcile(null, {

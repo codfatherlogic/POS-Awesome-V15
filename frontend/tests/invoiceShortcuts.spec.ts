@@ -49,6 +49,36 @@ describe("invoiceShortcuts", () => {
 		expect(event.defaultPrevented).toBe(true);
 	});
 
+	it("uses F4 to open the employee switch flow", async () => {
+		const vm = createVm();
+		const event = new KeyboardEvent("keydown", {
+			key: "F4",
+			bubbles: true,
+			cancelable: true,
+		});
+
+		await (invoiceShortcuts as any).handleInvoiceShortcut.call(vm, event);
+
+		expect(vm.eventBus.emit).toHaveBeenCalledWith("open_employee_switch");
+		expect(vm.toastStore.show).not.toHaveBeenCalled();
+		expect(event.defaultPrevented).toBe(true);
+	});
+
+	it("uses F8 to lock the POS screen", async () => {
+		const vm = createVm();
+		const event = new KeyboardEvent("keydown", {
+			key: "F8",
+			bubbles: true,
+			cancelable: true,
+		});
+
+		await (invoiceShortcuts as any).handleInvoiceShortcut.call(vm, event);
+
+		expect(vm.eventBus.emit).toHaveBeenCalledWith("lock_pos_screen");
+		expect(vm.toastStore.show).not.toHaveBeenCalled();
+		expect(event.defaultPrevented).toBe(true);
+	});
+
 	it("switches compact layout to the invoice before focusing cart quantity fields", async () => {
 		const vm = createVm();
 		const event = createAltEvent("q", "KeyQ");

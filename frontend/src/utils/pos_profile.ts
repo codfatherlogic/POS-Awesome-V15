@@ -3,9 +3,16 @@ import {
 	setOpeningStorage,
 	setPrintTemplate,
 	setTermsAndConditions,
+	getBootstrapSnapshot,
+	setBootstrapSnapshot,
 } from "../offline/index";
+import { createBootstrapSnapshotFromRegisterData } from "../offline/bootstrapSnapshot";
 
+declare const __BUILD_VERSION__: string;
 declare const frappe: any;
+
+const BUILD_VERSION =
+	typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
 
 async function cachePrintTemplateAndTerms(profile: any) {
 	if (!profile || typeof frappe === "undefined" || !navigator.onLine) return;
@@ -49,7 +56,15 @@ function hasProfileChanged(currentProfile: any, nextProfile: any) {
 function updateOpeningStorageProfile(profile: any) {
 	const cached = getOpeningStorage() as any;
 	if (cached?.pos_profile) {
-		setOpeningStorage({ ...cached, pos_profile: profile });
+		const updated = { ...cached, pos_profile: profile };
+		setOpeningStorage(updated);
+		setBootstrapSnapshot(
+			createBootstrapSnapshotFromRegisterData(
+				updated,
+				getBootstrapSnapshot(),
+				{ buildVersion: BUILD_VERSION },
+			),
+		);
 	}
 }
 
@@ -90,6 +105,16 @@ export async function ensurePosProfile() {
 		if (res.message) {
 			frappe.boot.pos_profile = res.message;
 			updateOpeningStorageProfile(res.message);
+			setBootstrapSnapshot(
+				createBootstrapSnapshotFromRegisterData(
+					{
+						pos_profile: res.message,
+						pos_opening_shift: (getOpeningStorage() as any)?.pos_opening_shift,
+					},
+					getBootstrapSnapshot(),
+					{ buildVersion: BUILD_VERSION },
+				),
+			);
 			await cachePrintTemplateAndTerms(res.message);
 			return res.message;
 		}

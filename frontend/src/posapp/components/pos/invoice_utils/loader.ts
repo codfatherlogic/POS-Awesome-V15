@@ -4,6 +4,7 @@ import {
 	getCachedCustomerBalance,
 } from "../../../../offline/index";
 import { useDiscounts } from "../../../composables/pos/shared/useDiscounts";
+import { resolvePosDocumentDoctype } from "../../../utils/posDocumentMode";
 
 declare const __: (_text: string, _args?: any[]) => string;
 declare const flt: (_value: unknown, _precision?: number) => number;
@@ -44,21 +45,28 @@ declare const frappe: any;
  */
 
 export async function fetch_customer_balance(context: any) {
+	context.customer_balance_loading = true;
 	try {
 		if (!context.customer) {
 			context.customer_balance = 0;
+			context.customer_balance_currency = undefined;
+			context.customer_balance_loading = false;
 			return;
 		}
 
 		// Check if offline and use cached balance
 		if (isOffline()) {
-			const cachedBalance = getCachedCustomerBalance(context.customer);
-			if (cachedBalance !== null) {
-				context.customer_balance = cachedBalance;
+			const cachedData = getCachedCustomerBalance(context.customer);
+			if (cachedData !== null) {
+				context.customer_balance = cachedData.balance;
+				context.customer_balance_currency = cachedData.currency;
+				context.customer_balance_loading = false;
 				return;
 			} else {
 				// No cached balance available in offline mode
 				context.customer_balance = 0;
+				context.customer_balance_currency = undefined;
+				context.customer_balance_loading = false;
 				context.toastStore.show({
 					title: __("Customer balance unavailable offline"),
 					text: __(
@@ -73,21 +81,25 @@ export async function fetch_customer_balance(context: any) {
 		// Online mode: fetch from server and cache the result
 		const r = await frappe.call({
 			method: "posawesome.posawesome.api.customer.get_customer_balance",
-			args: { customer: context.customer },
+			args: { customer: context.customer, company: context.pos_profile?.company },
 		});
 
 		const balance = r?.message?.balance || 0;
+		const currency = r?.message?.currency || undefined;
 		context.customer_balance = balance;
+		context.customer_balance_currency = currency;
 
 		// Cache the balanced for offline use
-		saveCustomerBalance(context.customer, balance);
+		saveCustomerBalance(context.customer, balance, currency);
+		context.customer_balance_loading = false;
 	} catch (error) {
 		console.error("Error fetching balance:", error);
 
 		// Try to use cached balance as fallback
-		const cachedBalance = getCachedCustomerBalance(context.customer);
-		if (cachedBalance !== null) {
-			context.customer_balance = cachedBalance;
+		const cachedData = getCachedCustomerBalance(context.customer);
+		if (cachedData !== null) {
+			context.customer_balance = cachedData.balance;
+			context.customer_balance_currency = cachedData.currency;
 			context.toastStore.show({
 				title: __("Using cached customer balance"),
 				text: __("Could not fetch latest balance from server"),
@@ -99,7 +111,9 @@ export async function fetch_customer_balance(context: any) {
 				color: "error",
 			});
 			context.customer_balance = 0;
+			context.customer_balance_currency = undefined;
 		}
+		context.customer_balance_loading = false;
 	}
 }
 
@@ -180,7 +194,10 @@ export async function load_invoice(
 		}
 	} else if (
 		data.doctype === "Sales Order" &&
-		context.pos_profile?.posa_create_only_sales_order
+		resolvePosDocumentDoctype({
+			invoiceType: "Order",
+			posProfile: context.pos_profile,
+		}) === "Sales Order"
 	) {
 		context.invoiceType = "Order";
 		if (!context.invoiceTypes.includes("Order")) {
@@ -210,7 +227,11 @@ export async function load_invoice(
 					? context.makeid(20)
 					: Math.random().toString(36).substr(2, 9);
 			}
-			if (item.batch_no) {
+			if (
+				item.batch_no &&
+				Array.isArray(item.batch_no_data) &&
+				item.batch_no_data.length > 0
+			) {
 				if (context.set_batch_qty)
 					context.set_batch_qty(item, item.batch_no);
 			}
@@ -256,11 +277,19 @@ export async function load_invoice(
 		);
 		context.delivery_charges_rate = data.posa_delivery_charges_rate;
 	}
+	const roundFloat = (value: unknown, fallbackPrecision = 2) => {
+		const precision = Number.isFinite(Number(context.float_precision))
+			? Number(context.float_precision)
+			: fallbackPrecision;
+		return context.flt
+			? context.flt(value, precision)
+			: flt(value, precision);
+	};
 	let docDiscountAmount = flt(data.discount_amount);
 	const docDiscountPercentage =
 		data.additional_discount_percentage !== undefined &&
 		data.additional_discount_percentage !== null
-			? flt(data.additional_discount_percentage)
+			? roundFloat(data.additional_discount_percentage)
 			: 0;
 	const docIsReturn = Boolean(data.is_return);
 	if (docIsReturn && !usePercentageDiscount && docDiscountAmount > 0) {
@@ -343,6 +372,7 @@ export async function load_invoice(
 		} else {
 			resolvedPercentage = Math.abs(resolvedPercentage);
 		}
+		resolvedPercentage = roundFloat(resolvedPercentage);
 
 		context.additional_discount_percentage = resolvedPercentage;
 		updateDiscountAmount(context);

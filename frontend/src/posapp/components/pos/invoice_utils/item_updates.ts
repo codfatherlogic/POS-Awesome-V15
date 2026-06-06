@@ -1,8 +1,32 @@
 import stockCoordinator from "../../../utils/stockCoordinator";
 import { isOffline } from "../../../../offline/index";
+import { syncReturnDiscountProration } from "./return_discount";
 
 declare const __: (_text: string, _args?: any[]) => string;
 declare const frappe: any;
+
+function syncLineAmounts(context: any, item: any) {
+	if (!item) return;
+	const qty = Number.parseFloat(String(item.qty ?? 0)) || 0;
+	const rate = Number.parseFloat(String(item.rate ?? 0)) || 0;
+	const baseRate =
+		Number.parseFloat(String(item.base_rate ?? item.rate ?? 0)) || 0;
+	const fmt = (value: number) =>
+		context?.flt
+			? context.flt(value, context.currency_precision)
+			: value;
+
+	item.amount = fmt(qty * rate);
+	item.base_amount = fmt(qty * baseRate);
+}
+
+function refreshInvoiceTotals(context: any) {
+	if (typeof context?.invoiceStore?.recalculateTotals === "function") {
+		context.invoiceStore.recalculateTotals();
+	} else if (typeof context?.invoiceStore?.triggerUpdateTotals === "function") {
+		context.invoiceStore.triggerUpdateTotals();
+	}
+}
 
 export async function update_items_details(context: any, items: any[]) {
 	if (!items?.length) return;
@@ -121,7 +145,10 @@ export async function update_items_details(context: any, items: any[]) {
 				if (resolvedCurrency) {
 					item.currency = resolvedCurrency;
 				}
+				syncLineAmounts(context, item);
 			});
+
+			refreshInvoiceTotals(context);
 		}
 	} catch (error) {
 		console.error("Error updating items:", error);
@@ -434,10 +461,11 @@ export function _applyItemDetailPayload(
 			item.base_rate = baseRate;
 			item.discount_amount = fmt(toDisplay(baseDiscountAmount));
 			item.rate = fmt(toDisplay(baseRate));
-			item.base_amount = fmt(baseRate * (Number(item.qty) || 0));
-			item.amount = fmt(item.rate * (Number(item.qty) || 0));
 		}
 	}
+
+	syncLineAmounts(context, item);
+	refreshInvoiceTotals(context);
 }
 
 export function _collectManualRateOverrides(context: any, items: any[]) {
@@ -890,48 +918,8 @@ export function _normalizeReturnDocTotals(context: any, doc: any) {
 }
 
 export function applyReturnDiscountProration(context: any) {
-	if (
-		!context ||
-		!context.isReturnInvoice ||
-		context.pos_profile?.posa_use_percentage_discount ||
-		!context.return_doc ||
-		typeof context.return_doc !== "object"
-	) {
-		return;
-	}
-
-	const returnDoc = context.return_doc;
-	const originalDiscount = Math.abs(
-		Number(context.return_discount_base_amount || returnDoc.discount_amount || 0),
+	syncReturnDiscountProration(
+		context,
+		"[POSA][Returns] Hook auto-prorate discount",
 	);
-	const originalTotal = Math.abs(
-		Number(
-			context.return_discount_base_total ??
-				returnDoc.total ??
-				returnDoc.net_total ??
-				returnDoc.grand_total ??
-				0,
-		),
-	);
-	const returnTotal = Math.abs(Number(context.Total || 0));
-
-	if (!originalDiscount || !originalTotal || !returnTotal) {
-		return;
-	}
-
-	const ratio = Math.min(1, returnTotal / originalTotal);
-	const prorated = -Math.abs(originalDiscount * ratio);
-	const current = Number(context.additional_discount || 0);
-	if (Math.abs(current - prorated) > 0.0001) {
-		console.log("[POSA][Returns] Hook auto-prorate discount", {
-			originalDiscount,
-			originalTotal,
-			returnTotal,
-			ratio,
-			prorated,
-		});
-		context.additional_discount = prorated;
-		context.discount_amount = prorated;
-		context.additional_discount_percentage = 0;
-	}
 }

@@ -1,19 +1,94 @@
 <template>
 	<div fluid :class="rtlClasses">
-		<AppLoadingOverlay
-			:visible="isPaymentRouteLocked"
-			:message="paymentsLoadingMessage"
-		/>
+		<AppLoadingOverlay :visible="isPaymentRouteLocked" :message="paymentsLoadingMessage" />
 		<v-row v-show="!dialog">
 			<v-col md="8" cols="12" class="pb-2 pr-0">
 				<v-card
 					class="main mx-auto mt-3 p-3 pb-16 overflow-y-auto pos-themed-card"
 					style="max-height: calc(100dvh - 32px); height: calc(100dvh - 32px)"
 				>
-					<Customer></Customer>
+					<div class="pay-mode-controls">
+						<div class="pay-mode-controls__group">
+							<div class="pay-mode-controls__label">{{ __("Payment Entry Type") }}</div>
+							<v-btn-toggle
+								v-model="paymentEntryType"
+								mandatory
+								density="comfortable"
+								class="pay-mode-toggle pay-mode-toggle--entry"
+							>
+								<v-btn value="Receive" class="pay-mode-btn pay-mode-btn--receive">
+									{{ __("Receive") }}
+								</v-btn>
+								<v-btn value="Pay" class="pay-mode-btn pay-mode-btn--pay">
+									{{ __("Pay") }}
+								</v-btn>
+							</v-btn-toggle>
+						</div>
+
+						<div class="pay-mode-controls__group">
+							<div class="pay-mode-controls__label">{{ __("Party Type") }}</div>
+							<v-btn-toggle
+								v-model="partyType"
+								mandatory
+								density="comfortable"
+								class="pay-mode-toggle pay-mode-toggle--party"
+							>
+								<v-btn
+									v-for="option in allowedPartyTypes"
+									:key="option"
+									:value="option"
+									:class="[
+										'pay-mode-btn',
+										option === 'Customer'
+											? 'pay-mode-btn--customer'
+											: option === 'Supplier'
+												? 'pay-mode-btn--supplier'
+												: 'pay-mode-btn--employee',
+									]"
+								>
+									{{ __(option) }}
+								</v-btn>
+							</v-btn-toggle>
+						</div>
+					</div>
+
+					<v-row class="pay-customer-row" dense>
+						<v-col
+							cols="12"
+							:md="pos_profile?.posa_allow_change_posting_date ? 9 : 12"
+							class="pb-0"
+						>
+							<Customer v-if="isCustomerPartyType"></Customer>
+							<PayPartySelector
+								v-else
+								v-model="customer_name"
+								:party-type="partyType"
+								:items="currentPartyOptions"
+								:loading="partySearchLoading"
+								@search="handlePartySearch"
+							/>
+						</v-col>
+						<v-col
+							v-if="pos_profile?.posa_allow_change_posting_date"
+							cols="12"
+							md="3"
+							class="pb-0"
+						>
+							<VueDatePicker
+								v-model="postingDateDisplay"
+								model-type="format"
+								format="dd-MM-yyyy"
+								auto-apply
+								teleport
+								:placeholder="__('Posting Date')"
+								class="sleek-field posting-date-input pos-themed-input pay-posting-date"
+							/>
+						</v-col>
+					</v-row>
 					<v-divider></v-divider>
 
 					<PayInvoicesTable
+						v-if="showReconciliationSections"
 						v-model:pos-profile-search="pos_profile_search"
 						v-model:currency-filter="currency_filter"
 						:invoices="outstanding_invoices"
@@ -28,7 +103,8 @@
 						:loading="invoices_loading"
 						:auto-reconcile-loading="auto_reconcile_loading"
 						:auto-reconcile-summary="auto_reconcile_summary"
-						:customer-name="customer_name"
+						:party-name="customer_name"
+						:section-title="invoiceSectionTitle"
 						:is-invoice-selected="isInvoiceSelected"
 						:item-class="isSelected"
 						:currency-symbol="currencySymbol"
@@ -37,14 +113,11 @@
 						@search="get_outstanding_invoices"
 						@clear-selection="selected_invoices = []"
 						@auto-reconcile="autoReconcile"
-						@select-row="
-							toggleInvoiceSelection($event, customer_name, (cust) =>
-								customersStore.setSelectedCustomer(cust),
-							)
-						"
+						@select-row="handleInvoiceSelection"
 					/>
 
 					<PayUnallocatedTable
+						v-if="showReconciliationSections"
 						v-model:selected-payments="selected_payments"
 						:payments="unallocated_payments"
 						:pos-profile="pos_profile"
@@ -52,12 +125,14 @@
 						:total-selected="total_selected_payments"
 						:loading="unallocated_payments_loading"
 						:headers="unallocated_payments_headers"
+						:section-title="paymentSectionTitle"
 						:currency-symbol="currencySymbol"
 						:format-currency="formatCurrency"
 						:payment-row-class="paymentRowClass"
 					/>
 
 					<PayMpesaSection
+						v-if="showMpesaSection"
 						v-model:selected-payments="selected_mpesa_payments"
 						v-model:search-name="mpesa_search_name"
 						v-model:search-mobile="mpesa_search_mobile"
@@ -79,8 +154,11 @@
 					style="max-height: calc(100dvh - 32px); height: calc(100dvh - 32px)"
 				>
 					<PayTotalsSidebar
+						ref="payTotalsSidebarRef"
 						v-model:exchange-rate="exchangeRate"
 						v-model:auto-allocate-payment-amount="autoAllocatePaymentAmount"
+						v-model:reference-no="referenceNo"
+						v-model:reference-date="referenceDate"
 						:pos-profile="pos_profile"
 						:total-selected-invoices="total_selected_invoices"
 						:selected-invoices-count="selected_invoices.length"
@@ -88,6 +166,8 @@
 						:total-selected-mpesa="total_selected_mpesa_payments"
 						:payment-methods="payment_methods"
 						:filtered-payment-methods="filtered_payment_methods"
+						:selected-payments-detail="selected_payments_detail"
+						:new-payments-detail="new_payments_detail"
 						:invoice-total-currency="invoiceTotalCurrency"
 						:payment-total-currency="paymentTotalCurrency"
 						:mpesa-total-currency="mpesaTotalCurrency"
@@ -99,8 +179,14 @@
 						:currency-symbol="currencySymbol"
 						:format-currency="formatCurrency"
 						:get-payment-method-currency="getPaymentMethodCurrency"
+						:party-account="partyAccount"
+						:payment-method-accounts="payment_method_accounts"
+						:available-bank-accounts="available_bank_accounts"
+						:payment-type="paymentEntryType"
+						:invoice-conversion-rate="invoiceConversionRate"
 						@validate-exchange-rate="validateExchangeRate"
 						@fetch-exchange-rate="fetchExchangeRate"
+						@update:bank-account="handleBankAccountChange"
 					/>
 
 					<PayActionButtons
@@ -118,7 +204,9 @@
 <script>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick, getCurrentInstance } from "vue";
 import { storeToRefs } from "pinia";
+import VueDatePicker from "@vuepic/vue-datepicker";
 import format from "../../../format";
+import { normalizeDateForBackend } from "../../../format";
 import Customer from "../customer/Customer.vue";
 import {
 	initPromise,
@@ -148,6 +236,11 @@ import { getValidCachedOpeningForCurrentUser } from "../../../utils/openingCache
 import { usePosPayData } from "../../../composables/pos/payments/usePosPayData";
 import { usePosPaySelection } from "../../../composables/pos/payments/usePosPaySelection";
 import { usePosPaySubmission } from "../../../composables/pos/payments/usePosPaySubmission";
+import {
+	getAllowedPartyTypes,
+	normalizePartyTypeForPaymentType,
+	shouldShowReconciliationSections,
+} from "../../pos_pay/paymentModes";
 
 // Sub-components
 import PayInvoicesTable from "../../pos_pay/PayInvoicesTable.vue";
@@ -155,21 +248,35 @@ import PayUnallocatedTable from "../../pos_pay/PayUnallocatedTable.vue";
 import PayMpesaSection from "../../pos_pay/PayMpesaSection.vue";
 import PayTotalsSidebar from "../../pos_pay/PayTotalsSidebar.vue";
 import PayActionButtons from "../../pos_pay/PayActionButtons.vue";
+import PayPartySelector from "../../pos_pay/PayPartySelector.vue";
 import AppLoadingOverlay from "../../ui/LoadingOverlay.vue";
 import {
 	buildPaymentRouteLoadingMessage,
 	isPaymentRouteLocked as resolvePaymentRouteLocked,
 } from "../../../utils/paymentRouteReadiness";
+import { loadPaymentMethodCurrencyMap } from "../../../utils/paymentMethodCurrencyCache";
+
+const getTodayDate = () => frappe?.datetime?.nowdate?.() || new Date().toISOString().slice(0, 10);
+const formatDisplayDate = (date) => {
+	if (!date) return "";
+	const parts = String(date).split("-");
+	if (parts.length === 3) {
+		return `${parts[2]}-${parts[1]}-${parts[0]}`;
+	}
+	return String(date);
+};
 
 export default {
 	mixins: [format],
 	components: {
 		Customer,
+		VueDatePicker,
 		PayInvoicesTable,
 		PayUnallocatedTable,
 		PayMpesaSection,
 		PayTotalsSidebar,
 		PayActionButtons,
+		PayPartySelector,
 		AppLoadingOverlay,
 	},
 	setup() {
@@ -192,40 +299,28 @@ export default {
 		const dialog = ref(false);
 		const pos_profile = ref({});
 		const pos_opening_shift = ref("");
+		const paymentEntryType = ref("Receive");
+		const partyType = ref("Customer");
 		const customer_name = ref("");
+		const postingDate = ref(getTodayDate());
+		const supplierOptions = ref([]);
+		const employeeOptions = ref([]);
+		const partySearchLoading = ref(false);
 		const company = ref("");
 		const pos_profile_search = ref("");
 		const currency_filter = ref("ALL");
 		const autoAllocatePaymentAmount = ref(true);
 		const exchangeRate = ref(null);
 		const companyCurrency = ref(null);
+		const referenceNo = ref("");
+		const referenceDate = ref("");
 		const exchangeRateLoading = ref(false);
 		const exchangeRateError = ref(null);
 		const payment_method_currencies = ref({});
+		const payment_method_accounts = ref({});
+		const available_bank_accounts = ref({});
 		const payment_methods_list = ref([]);
-
-		// Headers
-		const invoices_headers = [
-			{ title: "", align: "start", sortable: false, key: "actions", width: "50px" },
-			{ title: __("Invoice"), align: "start", sortable: true, key: "voucher_no" },
-			{ title: __("Type"), align: "start", sortable: true, key: "voucher_type" },
-			{ title: __("Customer"), align: "start", sortable: true, key: "customer_name" },
-			{ title: __("Date"), align: "start", sortable: true, key: "posting_date" },
-			{ title: __("Due Date"), align: "start", sortable: true, key: "due_date" },
-			{ title: __("Total"), align: "end", sortable: true, key: "invoice_amount" },
-			{ title: __("Outstanding"), align: "end", sortable: true, key: "outstanding_amount" },
-		];
-
-		const unallocated_payments_headers = [
-			{ title: "", align: "center", sortable: false, key: "select", width: "50px" },
-			{ title: __("Payment ID"), align: "start", sortable: true, key: "name" },
-			{ title: __("Customer"), align: "start", sortable: true, key: "customer_name" },
-			{ title: __("Date"), align: "start", sortable: true, key: "posting_date" },
-			{ title: __("Mode"), align: "start", sortable: true, key: "mode_of_payment" },
-			{ title: __("Reference"), align: "start", sortable: false, key: "reference_invoice" },
-			{ title: __("Paid"), align: "end", sortable: true, key: "paid_amount" },
-			{ title: __("Unallocated"), align: "end", sortable: true, key: "unallocated_amount" },
-		];
+		const partyAccount = ref(null);
 
 		const mpesa_payment_headers = [
 			{ title: __("Payment ID"), align: "start", sortable: true, key: "transid" },
@@ -280,6 +375,8 @@ export default {
 			posProfile: pos_profile,
 			company,
 			customerName: customer_name,
+			partyType,
+			paymentType: paymentEntryType,
 			toastStore,
 			eventBus: proxy?.eventBus,
 			currencySymbol,
@@ -295,6 +392,7 @@ export default {
 			total_selected_payments,
 			total_selected_mpesa_payments,
 			total_payment_methods,
+			selected_payments_detail,
 			total_of_diff,
 			toggleInvoiceSelection,
 			isInvoiceSelected,
@@ -371,7 +469,7 @@ export default {
 		const total_outstanding_amount = computed(() => {
 			if (!outstanding_invoices.value.length) return 0;
 			return outstanding_invoices.value.reduce(
-				(acc, cur) => acc + flt(cur?.outstanding_amount || 0),
+				(acc, cur) => acc + flt(cur?.outstanding_amount_in_invoice_currency ?? cur?.outstanding_amount ?? 0),
 				0,
 			);
 		});
@@ -412,12 +510,12 @@ export default {
 				if (!summary[key]) {
 					summary[key] = {
 						amount: 0,
-						symbol: currencySymbol(partyCurr),
+						symbol: currencySymbol(invoiceCurr),
 						party_currency: partyCurr,
 						invoice_currency: invoiceCurr,
 					};
 				}
-				summary[key].amount += flt(inv.outstanding_amount || 0);
+				summary[key].amount += flt(inv.outstanding_amount_in_invoice_currency ?? inv.outstanding_amount ?? 0);
 			});
 			return summary;
 		});
@@ -434,15 +532,92 @@ export default {
 
 		const filtered_payment_methods = computed(() => {
 			if (!payment_methods.value.length) return [];
-			if (!selected_invoices.value.length) return payment_methods.value;
-			const target =
-				selected_invoices.value[0]?.party_account_currency ||
-				selected_invoices.value[0]?.currency ||
-				pos_profile.value.currency;
-			return payment_methods.value.filter(
-				(m) => getPaymentMethodCurrency(m.mode_of_payment) === target,
-			);
+			return payment_methods.value;
 		});
+
+		const rateFromCurrencyToCompany = (currency) => {
+			if (!currency || currency === companyCurrencyLocal.value) return 1;
+			if (currency === invoiceTotalCurrency.value) return flt(exchangeRate.value || 1);
+			return flt(invoiceConversionRate.value || exchangeRate.value || 1);
+		};
+
+		const new_payments_detail = computed(() => {
+			if (!filtered_payment_methods.value.length) return [];
+			return filtered_payment_methods.value
+				.filter((m) => flt(m.amount) > 0)
+				.map((m) => {
+					const mopCurrency = getPaymentMethodCurrency(m.mode_of_payment);
+					const rate = rateFromCurrencyToCompany(mopCurrency);
+					return {
+						mode_of_payment: m.mode_of_payment,
+						paid_amount: flt(m.amount),
+						currency: mopCurrency,
+						received_amount: flt(m.amount),
+						exchange_rate: rate,
+					};
+				});
+		});
+
+		const invoiceConversionRate = computed(() => {
+			if (selected_invoices.value.length > 0) {
+				return selected_invoices.value[0]?.conversion_rate ?? null;
+			}
+			return null;
+		});
+
+		const postingDateDisplay = computed({
+			get: () => formatDisplayDate(postingDate.value),
+			set: (value) => {
+				const normalized = normalizeDateForBackend(value);
+				postingDate.value = normalized || getTodayDate();
+			},
+		});
+		const allowedPartyTypes = computed(() => getAllowedPartyTypes(paymentEntryType.value));
+		const resolvedPartyLabel = computed(() => {
+			if (partyType.value === "Supplier") return __("Supplier");
+			if (partyType.value === "Employee") return __("Employee");
+			return __("Customer");
+		});
+		const invoiceSectionTitle = computed(() =>
+			partyType.value === "Supplier" ? __("Supplier Invoices") : __("Invoices"),
+		);
+		const paymentSectionTitle = computed(() =>
+			partyType.value === "Supplier" ? __("Supplier Payments") : __("Payments"),
+		);
+		const invoices_headers = computed(() => [
+			{ title: "", align: "start", sortable: false, key: "actions", width: "50px" },
+			{ title: __("Invoice"), align: "start", sortable: true, key: "voucher_no" },
+			{ title: __("Type"), align: "start", sortable: true, key: "voucher_type" },
+			{ title: resolvedPartyLabel.value, align: "start", sortable: true, key: "party_name" },
+			{ title: __("Date"), align: "start", sortable: true, key: "posting_date" },
+			{ title: __("Due Date"), align: "start", sortable: true, key: "due_date" },
+			{ title: __("Total"), align: "end", sortable: true, key: "invoice_amount" },
+			{ title: __("Outstanding"), align: "end", sortable: true, key: "outstanding_amount" },
+		]);
+		const unallocated_payments_headers = computed(() => [
+			{ title: "", align: "center", sortable: false, key: "select", width: "50px" },
+			{ title: __("Payment ID"), align: "start", sortable: true, key: "name" },
+			{ title: resolvedPartyLabel.value, align: "start", sortable: true, key: "party_name" },
+			{ title: __("Date"), align: "start", sortable: true, key: "posting_date" },
+			{ title: __("Mode"), align: "start", sortable: true, key: "mode_of_payment" },
+			{ title: __("Reference"), align: "start", sortable: false, key: "reference_invoice" },
+			{ title: __("Paid"), align: "end", sortable: true, key: "paid_amount" },
+			{ title: __("Unallocated"), align: "end", sortable: true, key: "unallocated_amount" },
+		]);
+		const isCustomerPartyType = computed(() => partyType.value === "Customer");
+		const showReconciliationSections = computed(() =>
+			shouldShowReconciliationSections(paymentEntryType.value, partyType.value),
+		);
+		const showMpesaSection = computed(
+			() => isCustomerPartyType.value && paymentEntryType.value === "Receive",
+		);
+		const currentPartyOptions = computed(() =>
+			partyType.value === "Supplier"
+				? supplierOptions.value
+				: partyType.value === "Employee"
+					? employeeOptions.value
+					: [],
+		);
 		const isPaymentRouteLocked = computed(() =>
 			resolvePaymentRouteLocked({
 				customersLoaded: !!customersLoaded.value,
@@ -450,17 +625,21 @@ export default {
 				isCustomerBackgroundLoading: !!isCustomerBackgroundLoading.value,
 			}),
 		);
-		const paymentsLoadingMessage = computed(() =>
-			buildPaymentRouteLoadingMessage(loadProgress.value),
-		);
+		const paymentsLoadingMessage = computed(() => buildPaymentRouteLoadingMessage(loadProgress.value));
 
 		const { isSubmitting, processPayment } = usePosPaySubmission({
 			customerName: customer_name,
+			partyName: customer_name,
+			partyType,
+			paymentType: paymentEntryType,
 			company,
 			posProfile: pos_profile,
 			posOpeningShift: pos_opening_shift,
+			postingDate,
 			exchangeRate,
 			invoiceTotalCurrency,
+			referenceNo,
+			referenceDate,
 			payment_methods,
 			selected_invoices,
 			selected_payments,
@@ -515,7 +694,7 @@ export default {
 					args: {
 						from_currency: invoiceTotalCurrency.value,
 						to_currency: companyCurrencyLocal.value,
-						transaction_date: frappe.datetime.nowdate(),
+						transaction_date: postingDate.value || getTodayDate(),
 						args: "for_selling",
 					},
 				});
@@ -538,21 +717,94 @@ export default {
 				mode_of_payment: m.mode_of_payment,
 				amount: 0,
 				row_id: m.name,
+				bank_account: null,
 			}));
 		};
 
 		const loadPaymentMethodCurrencies = async () => {
 			if (!pos_profile.value?.payments?.length || !company.value) return;
+			const modes = pos_profile.value.payments.map((p) => p.mode_of_payment).filter(Boolean);
 			try {
-				const modes = pos_profile.value.payments.map((p) => p.mode_of_payment).filter(Boolean);
-				// Call standard ERPNext method instead of missing custom method
 				const r = await frappe.call({
 					method: "posawesome.posawesome.api.payment_processing.utils.get_mode_of_payment_accounts",
 					args: { company: company.value, mode_of_payments: modes },
 				});
-				payment_method_currencies.value = { ...r.message };
+				const accountData = r.message || {};
+				payment_method_accounts.value = accountData;
+				const currencies = {};
+				for (const [mode, data] of Object.entries(accountData)) {
+					currencies[mode] = typeof data === "string" ? data : data.account_currency;
+				}
+				payment_method_currencies.value = currencies;
+				// Fetch available accounts for all modes
+				await Promise.all(modes.map((mode) => fetchAvailableAccounts(mode)));
 			} catch (e) {
-				console.error("Failed to load payment method currencies", e);
+				console.error("Failed to load payment method accounts", e);
+			}
+		};
+
+		const fetchAvailableAccounts = async (mode) => {
+			if (!company.value || !mode) return;
+			try {
+				const r = await frappe.call({
+					method: "posawesome.posawesome.api.payment_processing.utils.get_available_accounts_for_mop",
+					args: { company: company.value, mode_of_payment: mode },
+				});
+				const accounts = r.message || [];
+				available_bank_accounts.value = {
+					...available_bank_accounts.value,
+					[mode]: accounts,
+				};
+			} catch (e) {
+				console.error("Failed to fetch available accounts for", mode, e);
+			}
+		};
+
+		const fetchPartyAccount = async () => {
+			if (!customer_name.value || !company.value) {
+				partyAccount.value = null;
+				return;
+			}
+			try {
+				const r = await frappe.call({
+					method: "posawesome.posawesome.api.payment_processing.utils.get_party_account_info",
+					args: {
+						party_type: partyType.value || "Customer",
+						party: customer_name.value,
+						company: company.value,
+					},
+				});
+				partyAccount.value = r.message || null;
+			} catch (e) {
+				console.error("Failed to fetch party account", e);
+				partyAccount.value = null;
+			}
+		};
+
+		const handleBankAccountChange = (mode, bankAccount) => {
+			const method = payment_methods.value.find((m) => m.mode_of_payment === mode);
+			if (method) {
+				method.bank_account = bankAccount;
+				// Update currency map when account changes
+				if (bankAccount && available_bank_accounts.value[mode]) {
+					const acct = available_bank_accounts.value[mode].find(
+						(a) => a.account === bankAccount,
+					);
+					if (acct) {
+						payment_method_currencies.value = {
+							...payment_method_currencies.value,
+							[mode]: acct.account_currency,
+						};
+						payment_method_accounts.value = {
+							...payment_method_accounts.value,
+							[mode]: {
+								account: acct.account,
+								account_currency: acct.account_currency,
+								account_type: acct.account_type,
+							},
+						};
+					}
+				}
 			}
 		};
 
@@ -563,8 +815,7 @@ export default {
 			pos_profile.value = data.pos_profile;
 			pos_opening_shift.value = data.pos_opening_shift;
 			company.value = data.company?.name || data.pos_profile?.company || "";
-			companyCurrency.value =
-				data.company?.default_currency || data.pos_profile?.currency || null;
+			companyCurrency.value = data.company?.default_currency || data.pos_profile?.currency || null;
 			uiStore.setRegisterData(data);
 			proxy?.eventBus?.emit("payments_register_pos_profile", data);
 			set_payment_methods();
@@ -604,10 +855,7 @@ export default {
 				console.error("Error checking opening entry", e);
 				const cached =
 					cachedOpening ||
-					getValidCachedOpeningForCurrentUser(
-						getOpeningStorage(),
-						frappe?.session?.user,
-					);
+					getValidCachedOpeningForCurrentUser(getOpeningStorage(), frappe?.session?.user);
 				if (cached) {
 					await applyOpeningData(cached);
 					return;
@@ -639,12 +887,92 @@ export default {
 
 		const paymentRowClass = (item) => (item?.is_credit_note ? "credit-note-row" : "");
 		const isSelected = (item) => (isInvoiceSelected(item) ? "selected-row bg-primary bg-lighten-4" : "");
+		const searchSuppliers = async (searchText = "") => {
+			partySearchLoading.value = true;
+			try {
+				const r = await frappe.call({
+					method: "posawesome.posawesome.api.purchase_orders.search_suppliers",
+					args: {
+						search_text: searchText || "",
+						limit: 20,
+					},
+				});
+				supplierOptions.value = Array.isArray(r.message) ? r.message : [];
+			} catch (error) {
+				console.error("Failed to search suppliers", error);
+				supplierOptions.value = [];
+			} finally {
+				partySearchLoading.value = false;
+			}
+		};
+		const searchEmployees = async (searchText = "") => {
+			partySearchLoading.value = true;
+			try {
+				const likeValue = `%${(searchText || "").trim()}%`;
+				const r = await frappe.call({
+					method: "frappe.client.get_list",
+					args: {
+						doctype: "Employee",
+						fields: ["name", "employee_name"],
+						filters: { status: ["!=", "Left"] },
+						or_filters: searchText
+							? [{ name: ["like", likeValue] }, { employee_name: ["like", likeValue] }]
+							: undefined,
+						limit_page_length: 20,
+						order_by: "employee_name asc",
+					},
+				});
+				employeeOptions.value = Array.isArray(r.message) ? r.message : [];
+			} catch (error) {
+				console.error("Failed to search employees", error);
+				employeeOptions.value = [];
+			} finally {
+				partySearchLoading.value = false;
+			}
+		};
+		const handlePartySearch = (searchText = "") => {
+			if (partyType.value === "Supplier") {
+				void searchSuppliers(searchText);
+				return;
+			}
+			if (partyType.value === "Employee") {
+				void searchEmployees(searchText);
+			}
+		};
+		const resetPartyContext = () => {
+			clearSelections();
+			outstanding_invoices.value = [];
+			unallocated_payments.value = [];
+			mpesa_payments.value = [];
+			customer_name.value = "";
+			customer_info.value = "";
+			mpesa_search_name.value = "";
+			mpesa_search_mobile.value = "";
+			exchangeRate.value = null;
+			auto_reconcile_summary.value = "";
+			if (selectedCustomer.value) {
+				customersStore.setSelectedCustomer(null);
+			}
+		};
 		function refreshOutstandingInvoices() {
 			return get_outstanding_invoices(pos_profile_search.value || null);
+		}
+		function handleInvoiceSelection(item) {
+			toggleInvoiceSelection(item, customer_name, (cust) => {
+				if (isCustomerPartyType.value) {
+					customersStore.setSelectedCustomer(cust);
+					return;
+				}
+				customer_name.value = cust;
+			});
+			fetchPartyAccount();
+			loadPaymentMethodCurrencies();
 		}
 		async function syncCustomerPaymentContext(normalized, { forceReload = false } = {}) {
 			if (!normalized) {
 				customer_name.value = "";
+				referenceNo.value = "";
+				referenceDate.value = "";
 				clearSelections();
 				outstanding_invoices.value = [];
 				unallocated_payments.value = [];
@@ -671,6 +999,8 @@ export default {
 			customer_name.value = normalized;
 			if (!companyCurrency.value) await fetchCompanyCurrency();
 			fetch_customer_details();
+			fetchPartyAccount();
+			loadPaymentMethodCurrencies();
 			refreshOutstandingInvoices();
 			get_unallocated_payments();
 			get_draft_mpesa_payments_register(payment_methods_list.value);
@@ -703,10 +1033,15 @@ export default {
 		const submit_and_print = () => processPayment({ printAfter: true });
 
 		// Lifecycle & Watchers
+		const payTotalsSidebarRef = ref(null);
+
 		onMounted(() => {
 			if (proxy?.eventBus) {
 				proxy.eventBus.on("network-online", syncPendingPayments);
 				proxy.eventBus.on("server-online", syncPendingPayments);
+				proxy.eventBus.on("payment-submitted", () => {
+					payTotalsSidebarRef.value?.clearOverridesOnSubmit();
+				});
 			}
 			nextTick(() => check_opening_entry());
 		});
@@ -715,6 +1050,7 @@ export default {
 			if (proxy?.eventBus) {
 				proxy.eventBus.off("network-online", syncPendingPayments);
 				proxy.eventBus.off("server-online", syncPendingPayments);
+				proxy.eventBus.off("payment-submitted");
 			}
 		});
 
@@ -722,7 +1058,7 @@ export default {
 			selectedCustomer,
 			async (val) => {
 				const normalized = val || "";
-				if (isPaymentRouteLocked.value) {
+				if (isPaymentRouteLocked.value || !isCustomerPartyType.value) {
 					return;
 				}
 				await syncCustomerPaymentContext(normalized);
@@ -730,8 +1066,19 @@ export default {
 			{ immediate: true },
 		);
 
+		watch(customer_name, async (val, oldVal) => {
+			if (isPaymentRouteLocked.value || isCustomerPartyType.value) {
+				return;
+			}
+			const normalized = val || "";
+			if (normalized === (oldVal || "")) {
+				return;
+			}
+			await syncCustomerPaymentContext(normalized);
+		});
+
 		watch(refreshToken, () => {
-			if (isPaymentRouteLocked.value) return;
+			if (isPaymentRouteLocked.value || !isCustomerPartyType.value) return;
 			if (customer_name.value) fetch_customer_details();
 		});
 
@@ -739,10 +1086,42 @@ export default {
 			isPaymentRouteLocked,
 			(locked) => {
 				if (locked) return;
-				void syncCustomerPaymentContext(
-					selectedCustomer.value || customer_name.value || "",
-					{ forceReload: true },
-				);
+				void syncCustomerPaymentContext(selectedCustomer.value || customer_name.value || "", {
+					forceReload: true,
+				});
+			},
+			{ immediate: true },
+		);
+
+		watch(
+			paymentEntryType,
+			(newVal, oldVal) => {
+				const normalizedPartyType = normalizePartyTypeForPaymentType(newVal, partyType.value);
+				if (normalizedPartyType !== partyType.value) {
+					partyType.value = normalizedPartyType;
+					return;
+				}
+				if (typeof oldVal !== "undefined" && newVal !== oldVal) {
+					resetPartyContext();
+				}
+			},
+			{ immediate: true },
+		);
+
+		watch(
+			partyType,
+			(newVal, oldVal) => {
+				const normalized = normalizePartyTypeForPaymentType(paymentEntryType.value, newVal);
+				if (normalized !== newVal) {
+					partyType.value = normalized;
+					return;
+				}
+				if (typeof oldVal !== "undefined" && newVal !== oldVal) {
+					resetPartyContext();
+					handlePartySearch("");
+				} else if (typeof oldVal === "undefined" && !isCustomerPartyType.value) {
+					handlePartySearch("");
+				}
 			},
 			{ immediate: true },
 		);
@@ -751,7 +1130,8 @@ export default {
 			() => pos_profile.value?.posa_allow_reconcile_payments,
 			(enabled) => {
 				if (isPaymentRouteLocked.value) return;
-				if (!enabled || !customer_name.value || !company.value) return;
+				if (!enabled || !customer_name.value || !company.value || !showReconciliationSections.value)
+					return;
 				if (!unallocated_payments.value.length) {
 					get_unallocated_payments();
 				}
@@ -762,6 +1142,8 @@ export default {
 		watch(company, (newCompany, oldCompany) => {
 			if (isPaymentRouteLocked.value) return;
 			if (!newCompany || newCompany === oldCompany || !customer_name.value) return;
+			fetchPartyAccount();
+			loadPaymentMethodCurrencies();
 			refreshOutstandingInvoices();
 			get_unallocated_payments();
 			get_draft_mpesa_payments_register(payment_methods_list.value);
@@ -769,6 +1151,7 @@ export default {
 
 		watch(invoiceTotalCurrency, fetchExchangeRate, { immediate: true });
 		watch(companyCurrency, fetchExchangeRate, { immediate: true });
+		watch(postingDate, fetchExchangeRate, { immediate: true });
 		watch([paymentRouteTarget, outstanding_invoices], () => {
 			applyPaymentRouteTarget();
 		});
@@ -777,13 +1160,27 @@ export default {
 			dialog,
 			pos_profile,
 			pos_opening_shift,
+			paymentEntryType,
+			partyType,
+			allowedPartyTypes,
+			resolvedPartyLabel,
+			isCustomerPartyType,
+			showReconciliationSections,
+			showMpesaSection,
+			invoiceSectionTitle,
+			paymentSectionTitle,
 			customer_name,
+			postingDateDisplay,
+			currentPartyOptions,
+			partySearchLoading,
 			company,
 			pos_profile_search,
 			currency_filter,
 			autoAllocatePaymentAmount,
 			exchangeRate,
 			companyCurrency,
+			referenceNo,
+			referenceDate,
 			exchangeRateLoading,
 			exchangeRateError,
 			payment_method_currencies,
@@ -821,6 +1218,7 @@ export default {
 			total_selected_mpesa_payments,
 			total_payment_methods,
 			total_of_diff,
+			invoiceConversionRate,
 			toggleInvoiceSelection,
 			isInvoiceSelected,
 			clearSelections,
@@ -844,10 +1242,15 @@ export default {
 			validateExchangeRate,
 			set_payment_methods,
 			loadPaymentMethodCurrencies,
+			fetchAvailableAccounts,
+			handleBankAccountChange,
+			available_bank_accounts,
 			check_opening_entry,
 			syncPendingPayments,
 			paymentRowClass,
 			isSelected,
+			handlePartySearch,
+			handleInvoiceSelection,
 			submit,
 			submit_and_print,
 			rtlStyles,
@@ -870,5 +1273,205 @@ export default {
 
 .totals-wrapper {
 	font-weight: bold;
+}
+
+.pay-mode-controls {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+	margin-bottom: 14px;
+}
+
+.pay-mode-controls__group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.pay-mode-controls__label {
+	font-size: 0.8rem;
+	font-weight: 700;
+	color: var(--pos-text-secondary, var(--text-secondary));
+}
+
+.pay-mode-toggle {
+	width: fit-content;
+	max-width: 100%;
+	gap: 8px;
+	flex-wrap: wrap;
+	background: transparent !important;
+}
+
+.pay-mode-btn {
+	--v-theme-overlay-multiplier: 0 !important;
+	min-height: 44px;
+	border-radius: 999px !important;
+	padding-inline: 18px !important;
+	font-weight: 700;
+	letter-spacing: 0.01em;
+	text-transform: none;
+	border: 1px solid transparent !important;
+	transition:
+		background-color 0.18s ease,
+		color 0.18s ease,
+		border-color 0.18s ease,
+		box-shadow 0.18s ease,
+		transform 0.18s ease,
+		opacity 0.18s ease !important;
+	opacity: 0.88;
+}
+
+.pay-mode-btn:hover,
+.pay-mode-btn:focus,
+.pay-mode-btn:focus-visible {
+	transform: translateY(-1px);
+	box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12) !important;
+}
+
+.pay-mode-btn:active {
+	transform: translateY(0);
+}
+
+.pay-mode-btn.v-btn--active,
+.pay-mode-btn.v-btn--selected,
+.pay-mode-btn[aria-pressed="true"] {
+	opacity: 1;
+	box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18) !important;
+	border-width: 2px !important;
+	transform: translateY(-1px);
+}
+
+.pay-mode-btn .v-btn__overlay,
+.pay-mode-btn .v-btn__underlay {
+	opacity: 0 !important;
+	background: transparent !important;
+}
+
+.pay-mode-btn--receive {
+	background: rgba(var(--v-theme-success), 0.14) !important;
+	color: rgb(var(--v-theme-success)) !important;
+	border-color: rgba(var(--v-theme-success), 0.24) !important;
+}
+
+.pay-mode-btn--receive.v-btn--active,
+.pay-mode-btn--receive.v-btn--selected,
+.pay-mode-btn--receive[aria-pressed="true"] {
+	background: rgb(var(--v-theme-success)) !important;
+	color: #ffffff !important;
+	border-color: rgba(var(--v-theme-success), 0.92) !important;
+}
+
+.pay-mode-btn--pay {
+	background: rgba(var(--v-theme-warning), 0.16) !important;
+	color: rgb(var(--v-theme-warning)) !important;
+	border-color: rgba(var(--v-theme-warning), 0.28) !important;
+}
+
+.pay-mode-btn--pay.v-btn--active,
+.pay-mode-btn--pay.v-btn--selected,
+.pay-mode-btn--pay[aria-pressed="true"] {
+	background: rgb(var(--v-theme-warning)) !important;
+	color: #1f1300 !important;
+	border-color: rgba(var(--v-theme-warning), 0.96) !important;
+}
+
+.pay-mode-btn--customer {
+	background: rgba(var(--v-theme-primary), 0.14) !important;
+	color: rgb(var(--v-theme-primary)) !important;
+	border-color: rgba(var(--v-theme-primary), 0.24) !important;
+}
+
+.pay-mode-btn--customer.v-btn--active,
+.pay-mode-btn--customer.v-btn--selected,
+.pay-mode-btn--customer[aria-pressed="true"] {
+	background: rgb(var(--v-theme-primary)) !important;
+	color: #ffffff !important;
+	border-color: rgba(var(--v-theme-primary), 0.92) !important;
+}
+
+.pay-mode-btn--supplier {
+	background: rgba(var(--v-theme-secondary), 0.14) !important;
+	color: rgb(var(--v-theme-secondary)) !important;
+	border-color: rgba(var(--v-theme-secondary), 0.24) !important;
+}
+
+.pay-mode-btn--supplier.v-btn--active,
+.pay-mode-btn--supplier.v-btn--selected,
+.pay-mode-btn--supplier[aria-pressed="true"] {
+	background: rgb(var(--v-theme-secondary)) !important;
+	color: #ffffff !important;
+	border-color: rgba(var(--v-theme-secondary), 0.92) !important;
+}
+
+.pay-mode-btn--employee {
+	background: rgba(var(--v-theme-info), 0.14) !important;
+	color: rgb(var(--v-theme-info)) !important;
+	border-color: rgba(var(--v-theme-info), 0.24) !important;
+}
+
+.pay-mode-btn--employee.v-btn--active,
+.pay-mode-btn--employee.v-btn--selected,
+.pay-mode-btn--employee[aria-pressed="true"] {
+	background: rgb(var(--v-theme-info)) !important;
+	color: #ffffff !important;
+	border-color: rgba(var(--v-theme-info), 0.92) !important;
+}
+
+[data-theme="dark"] .pay-mode-btn--pay.v-btn--active,
+[data-theme="dark"] .pay-mode-btn--pay.v-btn--selected,
+[data-theme="dark"] .pay-mode-btn--pay[aria-pressed="true"] {
+	color: #ffffff !important;
+}
+
+.pay-mode-btn.v-btn--active .v-btn__content,
+.pay-mode-btn.v-btn--selected .v-btn__content,
+.pay-mode-btn[aria-pressed="true"] .v-btn__content {
+	color: inherit !important;
+	font-weight: 800;
+}
+
+.pay-customer-row {
+	align-items: start;
+}
+
+.pay-customer-row .customer-input-wrapper {
+	padding-right: 0;
+}
+
+.pay-posting-date .dp__input_wrap {
+	width: 100%;
+}
+
+.pay-posting-date .dp__input {
+	width: 100%;
+	min-height: 48px;
+	border-radius: 12px;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+	background-color: var(--field-bg);
+	color: var(--text-primary);
+	padding: 10px 12px;
+}
+
+.pay-posting-date:hover .dp__input {
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.pay-posting-date .dp__input_icon {
+	inset-inline-start: auto;
+	inset-inline-end: 30px;
+}
+
+.pay-posting-date .dp__input_icon_pad {
+	padding-inline-start: 12px;
+}
+
+.pay-posting-date .dp__input {
+	padding-right: calc(30px + var(--dp-input-icon-padding));
+}
+
+@media (max-width: 768px) {
+	.pay-mode-controls {
+		grid-template-columns: 1fr;
+	}
 }
 </style>

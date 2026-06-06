@@ -70,7 +70,11 @@
 				<PosCoupons></PosCoupons>
 			</v-col>
 			<v-col
-				v-if="(!useCompactPosSwitcher || compactPanel === 'selector') && activeView === 'payment' && !usePaymentDialog"
+				v-if="
+					(!useCompactPosSwitcher || compactPanel === 'selector') &&
+					activeView === 'payment' &&
+					!usePaymentDialog
+				"
 				:xl="useCompactPosSwitcher ? 12 : 5"
 				:lg="useCompactPosSwitcher ? 12 : 5"
 				:md="useCompactPosSwitcher ? 12 : 5"
@@ -218,7 +222,6 @@ import { useOffers } from "../../../composables/pos/shared/useOffers";
 import { clearExpiredCustomerBalances } from "../../../../offline/index";
 import { useResponsive } from "../../../composables/core/useResponsive";
 import { useRtl } from "../../../composables/core/useRtl";
-import { useCustomersStore } from "../../../stores/customersStore.js";
 import { useUIStore } from "../../../stores/uiStore.js";
 import { useInvoiceStore } from "../../../stores/invoiceStore.js";
 import { useItemsStore } from "../../../stores/itemsStore.js";
@@ -256,9 +259,7 @@ export default {
 		const useCompactPosSwitcher = computed(() => responsive.windowWidth.value < 1100);
 		const compactPanel = ref("selector");
 		const isPhone = computed(() => responsive.isPhone.value);
-		const showBottomDock = computed(
-			() => !dialog.value && responsive.windowWidth.value < 1100,
-		);
+		const showBottomDock = computed(() => !dialog.value && responsive.windowWidth.value < 1100);
 		const bottomDockHeight = ref(0);
 		let mobileDockObserver = null;
 		const isEditingAdditionalDiscount = ref(false);
@@ -275,16 +276,13 @@ export default {
 			const numericValue = Number(rawValue);
 			return Number.isFinite(numericValue) ? numericValue : fallbackTotal;
 		});
-		const activeCurrency = computed(
-			() => invoiceDoc.value?.currency || posProfile.value?.currency || "",
-		);
+		const activeCurrency = computed(() => invoiceDoc.value?.currency || posProfile.value?.currency || "");
 		const formatCompactNumber = (value) =>
 			new Intl.NumberFormat(undefined, {
 				maximumFractionDigits: value % 1 === 0 ? 0 : 2,
 			}).format(Number(value || 0));
 		const getCurrencySymbol = (currency) => {
-			const resolver =
-				window.get_currency_symbol || globalThis.get_currency_symbol;
+			const resolver = window.get_currency_symbol || globalThis.get_currency_symbol;
 			if (typeof resolver === "function") {
 				return resolver(currency || activeCurrency.value || "") || "";
 			}
@@ -307,29 +305,68 @@ export default {
 		const discountPercentageOfferName = computed(
 			() => invoicePanel.value?.discount_percentage_offer_name || null,
 		);
+		const showUnsignedReturnDiscount = computed(
+			() =>
+				!!invoicePanel.value?.return_discount_meta && !posProfile.value?.posa_use_percentage_discount,
+		);
 		const normalizeDiscountDisplay = (value) => {
 			if (value === 0 || value === "0") {
 				return "";
 			}
 			return value;
 		};
-		const additionalDiscountDisplay = ref(
-			normalizeDiscountDisplay(additionalDiscount.value),
-		);
+		const normalizeAdditionalDiscountDisplay = (value) => {
+			if (value === 0 || value === "0") {
+				return "";
+			}
+			if (showUnsignedReturnDiscount.value) {
+				const proratedValue = Number(invoicePanel.value?.return_discount_meta?.prorated_discount);
+				if (Number.isFinite(proratedValue)) {
+					return Math.abs(proratedValue);
+				}
+				const numericValue = Number(value);
+				if (Number.isFinite(numericValue)) {
+					return Math.abs(numericValue);
+				}
+			}
+			return value;
+		};
+		const normalizeAdditionalDiscountInput = (value) => {
+			if (showUnsignedReturnDiscount.value) {
+				const numericValue = Number(value);
+				if (Number.isFinite(numericValue)) {
+					const originalStoredValue = Number(additionalDiscount.value);
+					const sign = Math.sign(
+						Number.isFinite(originalStoredValue) && originalStoredValue !== 0
+							? originalStoredValue
+							: -1,
+					);
+					return sign * Math.abs(numericValue);
+				}
+			}
+			return value;
+		};
+		const additionalDiscountDisplay = ref(normalizeAdditionalDiscountDisplay(additionalDiscount.value));
 		const additionalDiscountPercentageDisplay = ref(
 			normalizeDiscountDisplay(additionalDiscountPercentage.value),
 		);
 
-		watch(additionalDiscount, (value) => {
-			if (!isEditingAdditionalDiscount.value) {
-				additionalDiscountDisplay.value = normalizeDiscountDisplay(value);
-			}
-		});
+		watch(
+			() => [
+				additionalDiscount.value,
+				invoicePanel.value?.return_discount_meta?.prorated_discount,
+				posProfile.value?.posa_use_percentage_discount,
+			],
+			([value]) => {
+				if (!isEditingAdditionalDiscount.value) {
+					additionalDiscountDisplay.value = normalizeAdditionalDiscountDisplay(value);
+				}
+			},
+		);
 
 		watch(additionalDiscountPercentage, (value) => {
 			if (!isEditingAdditionalDiscountPercentage.value) {
-				additionalDiscountPercentageDisplay.value =
-					normalizeDiscountDisplay(value);
+				additionalDiscountPercentageDisplay.value = normalizeDiscountDisplay(value);
 			}
 		});
 
@@ -393,8 +430,7 @@ export default {
 			}
 			showPaymentPanel();
 		};
-		const isSelectorViewActive = (view) =>
-			compactPanel.value === "selector" && activeView.value === view;
+		const isSelectorViewActive = (view) => compactPanel.value === "selector" && activeView.value === view;
 		const getFallbackBottomSpace = () => {
 			const rawValue = responsive.responsiveStyles.value["--bottom-safe-space"];
 			const parsed = Number.parseFloat(String(rawValue || "0"));
@@ -418,7 +454,7 @@ export default {
 			};
 		});
 		const handleAdditionalDiscountUpdate = (value) => {
-			invoiceStore.setAdditionalDiscount(value);
+			invoiceStore.setAdditionalDiscount(normalizeAdditionalDiscountInput(value));
 		};
 		const handleAdditionalDiscountFocus = () => {
 			isEditingAdditionalDiscount.value = true;
@@ -584,11 +620,7 @@ export default {
 		};
 	},
 	data: function () {
-		return {
-			// dialog moved to setup ref
-			itemsLoaded: false,
-			customersLoaded: false,
-		};
+		return {};
 	},
 
 	components: {
@@ -625,11 +657,6 @@ export default {
 				// this.uiStore.setPosSettings(doc); // We might need to implement this if it doesn't exist
 			});
 		},
-		checkLoadingComplete() {
-			if (this.itemsLoaded && this.customersLoaded) {
-				// Loading complete logic
-			}
-		},
 		// handleAddItem removed as ItemsSelector handles pos addition internally
 		handleRegisterPosData(data) {
 			this.pos_profile = data.pos_profile;
@@ -652,31 +679,13 @@ export default {
 			// Watch store for updates
 			this.$watch(
 				() => this.uiStore.posProfile,
-				async (newProfile) => {
+				(newProfile) => {
 					if (newProfile && newProfile.name) {
 						this.pos_profile = newProfile;
 						this.get_offers(newProfile.name, newProfile);
-
-						// Initialize Customers Store
-						const customersStore = useCustomersStore();
-						customersStore.setPosProfile(newProfile);
-						await customersStore.get_customer_names();
 					}
 				},
 				{ deep: true, immediate: true },
-			);
-
-			// Items loading state check
-			const { itemsLoaded } = storeToRefs(this.itemsStore);
-			this.$watch(
-				() => itemsLoaded.value,
-				(val) => {
-					if (val) {
-						this.itemsLoaded = true;
-						this.checkLoadingComplete();
-					}
-				},
-				{ immediate: true },
 			);
 		});
 	},
@@ -684,18 +693,6 @@ export default {
 	created() {
 		// Clean up expired customer balance cache on POS load
 		clearExpiredCustomerBalances();
-		const customersStore = useCustomersStore();
-		const { customersLoaded } = storeToRefs(customersStore);
-		this.$watch(
-			() => customersLoaded.value,
-			(value) => {
-				if (value) {
-					this.customersLoaded = true;
-					this.checkLoadingComplete();
-				}
-			},
-			{ immediate: true },
-		);
 	},
 };
 </script>

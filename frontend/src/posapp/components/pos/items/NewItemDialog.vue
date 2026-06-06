@@ -187,7 +187,7 @@ watch(
 const getUOMs = async () => {
 	if (uomList.value.length) return;
 	try {
-		const r = await itemService.getUOMs();
+		const r = await itemService.getUOMsData();
 		if (r) {
 			uomList.value = r.map((d) => d.name);
 		}
@@ -213,7 +213,7 @@ const submit = async () => {
 
 	loading.value = true;
 	try {
-		const res = await itemService.createItem({
+		const res = await itemService.createItemData({
 			item_code: form.item_code,
 			item_name: form.item_name,
 			barcode: form.barcode,

@@ -105,7 +105,7 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
-import { formatBuildVersion } from "../../stores/updateStore.js";
+import { formatBuildVersion } from "../../stores/updateStore";
 
 defineOptions({
 	name: "AboutDialog",

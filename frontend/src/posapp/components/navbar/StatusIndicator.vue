@@ -1,20 +1,53 @@
 <template>
 	<div class="status-section-enhanced mx-1">
-		<v-btn
-			icon
-			:title="statusText"
-			:aria-label="statusText"
-			:class="['status-btn-enhanced', { 'status-btn-enhanced--checking': props.serverConnecting }]"
-			:color="statusColor"
-			@click="emit('retry-status')"
-		>
-			<span
-				v-if="props.serverConnecting"
-				data-test="status-checking-indicator"
-				class="status-checking-indicator"
-			/>
-			<v-icon :color="statusColor">{{ statusIcon }}</v-icon>
-		</v-btn>
+		<v-tooltip location="bottom" max-width="320">
+			<template #activator="{ props: tooltipProps }">
+				<v-btn
+					v-bind="tooltipProps"
+					icon
+					:title="combinedStatusText"
+					:aria-label="combinedStatusText"
+					:class="[
+						'status-btn-enhanced',
+						{
+							'status-btn-enhanced--checking': props.serverConnecting,
+						},
+					]"
+					:color="statusColor"
+					aria-haspopup="dialog"
+					@click="emit('toggle-panel')"
+				>
+					<span
+						v-if="props.serverConnecting"
+						data-test="status-checking-indicator"
+						class="status-checking-indicator"
+					/>
+					<span
+						v-if="props.bootstrapWarningActive"
+						data-test="status-bootstrap-warning-indicator"
+						class="status-bootstrap-warning-indicator"
+					/>
+					<v-icon :color="statusColor">{{ statusIcon }}</v-icon>
+				</v-btn>
+			</template>
+			<div class="status-tooltip">
+				<div class="status-tooltip__line status-tooltip__line--primary">
+					{{ statusText }}
+				</div>
+				<div
+					v-if="props.bootstrapWarningActive && bootstrapWarningTooltipLines.length"
+					class="status-tooltip__warning"
+				>
+					<div
+						v-for="line in bootstrapWarningTooltipLines"
+						:key="line"
+						class="status-tooltip__line status-tooltip__line--warning"
+					>
+						{{ line }}
+					</div>
+				</div>
+			</div>
+		</v-tooltip>
 		<div class="status-info-always-visible">
 			<div
 				class="status-title-inline"
@@ -44,6 +77,8 @@ interface Props {
 	serverOnline?: boolean;
 	serverConnecting?: boolean;
 	isIpHost?: boolean;
+	bootstrapWarningActive?: boolean;
+	bootstrapWarningTooltip?: string;
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -51,9 +86,11 @@ const props = withDefaults(defineProps<Props>(), {
 	serverOnline: false,
 	serverConnecting: false,
 	isIpHost: false,
+	bootstrapWarningActive: false,
+	bootstrapWarningTooltip: "",
 });
 const emit = defineEmits<{
-	(e: "retry-status"): void;
+	(e: "toggle-panel"): void;
 }>();
 
 // @ts-ignore
@@ -172,6 +209,21 @@ const statusText = computed(() => {
 	return __(`Server Offline (${hostname})`);
 });
 
+const bootstrapWarningTooltipLines = computed(() => {
+	if (!props.bootstrapWarningActive || !props.bootstrapWarningTooltip) {
+		return [];
+	}
+
+	return props.bootstrapWarningTooltip
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean);
+});
+
+const combinedStatusText = computed(() =>
+	[statusText.value, ...bootstrapWarningTooltipLines.value].join(" "),
+);
+
 const connectivityLabel = computed(() => {
 	/**
 	 * Short, user-friendly connectivity label for the navbar.
@@ -233,11 +285,50 @@ const connectivityLabel = computed(() => {
 	pointer-events: none;
 }
 
+.status-bootstrap-warning-indicator {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	width: 9px;
+	height: 9px;
+	border-radius: 999px;
+	background: #ff9800;
+	box-shadow: 0 0 0 2px var(--pos-hover-bg);
+	pointer-events: none;
+}
+
 .status-info-always-visible {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
 	min-width: 120px;
+}
+
+.status-tooltip {
+	display: grid;
+	gap: 4px;
+	max-width: 280px;
+}
+
+.status-tooltip__warning {
+	display: grid;
+	gap: 4px;
+	padding-top: 4px;
+	border-top: 1px solid rgba(255, 152, 0, 0.24);
+}
+
+.status-tooltip__line {
+	white-space: normal;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.status-tooltip__line--primary {
+	font-weight: 600;
+}
+
+.status-tooltip__line--warning {
+	color: rgba(255, 152, 0, 0.98);
 }
 
 .status-title-inline {

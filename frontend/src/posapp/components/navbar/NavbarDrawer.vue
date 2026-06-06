@@ -10,39 +10,63 @@
 		:location="isRtl ? 'right' : 'left'"
 		:scrim="scrimColor"
 	>
-		<div v-if="!mini" class="drawer-header">
-			<v-avatar size="40">
-				<v-img :src="companyImg" alt="Company logo" />
-			</v-avatar>
-			<span class="drawer-company">{{ company }}</span>
-		</div>
-		<div v-else class="drawer-header-mini">
-			<v-avatar size="40">
-				<v-img :src="companyImg" alt="Company logo" />
-			</v-avatar>
-		</div>
+		<div class="drawer-shell">
+			<div>
+				<div v-if="!mini" class="drawer-header">
+					<v-avatar size="40">
+						<v-img :src="companyImg" alt="Company logo" />
+					</v-avatar>
+					<span class="drawer-company">{{ company }}</span>
+				</div>
+				<div v-else class="drawer-header-mini">
+					<v-avatar size="40">
+						<v-img :src="companyImg" alt="Company logo" />
+					</v-avatar>
+				</div>
 
-		<v-divider />
+				<v-divider />
 
-		<v-list density="compact" nav v-model:selected="activeItem" selected-class="active-item">
-			<v-list-item
-				v-for="(item, index) in items"
-				:key="item.text"
-				:value="index"
-				:to="item.to"
-				@click="handleItemClick"
-				class="drawer-item"
-				active-class="active-item"
-			>
-				<template v-slot:prepend>
-					<v-icon class="drawer-icon">{{ item.icon }}</v-icon>
-				</template>
-				<v-list-item-title class="drawer-item-title">{{ item.text }}</v-list-item-title>
-			</v-list-item>
-		</v-list>
-		<!-- Sport section, hidden by default -->
-		<div v-if="showSport">
-			<!-- Sport content goes here -->
+				<v-list density="compact" nav v-model:selected="activeItem" selected-class="active-item">
+					<v-list-item
+						v-for="(item, index) in items"
+						:key="item.text"
+						:value="index"
+						:to="item.to"
+						@click="handleItemClick"
+						class="drawer-item"
+						active-class="active-item"
+					>
+						<template v-slot:prepend>
+							<v-icon class="drawer-icon">{{ item.icon }}</v-icon>
+						</template>
+						<v-list-item-title class="drawer-item-title">{{ item.text }}</v-list-item-title>
+					</v-list-item>
+				</v-list>
+				<!-- Sport section, hidden by default -->
+				<div v-if="showSport">
+					<!-- Sport content goes here -->
+				</div>
+			</div>
+
+			<div v-if="footerAction" class="drawer-footer" data-test="drawer-footer-settings">
+				<v-divider class="drawer-footer-divider" />
+				<button
+					type="button"
+					class="drawer-footer-action"
+					data-test="drawer-footer-action"
+					@click="handleFooterActionClick"
+				>
+					<span class="drawer-footer-action__icon">
+						<v-icon class="drawer-icon">{{ footerAction.icon }}</v-icon>
+					</span>
+					<span v-if="!mini" class="drawer-footer-action__copy">
+						<span class="drawer-footer-action__title">{{ footerAction.text }}</span>
+						<span v-if="footerAction.subtitle" class="drawer-footer-action__subtitle">
+							{{ footerAction.subtitle }}
+						</span>
+					</span>
+				</button>
+			</div>
 		</div>
 	</v-navigation-drawer>
 </template>
@@ -62,9 +86,13 @@ const props = defineProps({
 	items: Array,
 	item: Number,
 	isDark: Boolean,
+	footerAction: {
+		type: Object,
+		default: null,
+	},
 });
 
-const emit = defineEmits(["update:drawer", "update:item"]);
+const emit = defineEmits(["update:drawer", "update:item", "open-settings"]);
 const { isRtl, rtlClasses } = useRtl();
 
 const mini = ref(false);
@@ -121,6 +149,11 @@ function handleItemClick() {
 	}
 }
 
+function handleFooterActionClick() {
+	emit("open-settings");
+	closeDrawer();
+}
+
 function closeDrawer() {
 	drawerOpen.value = false;
 	mini.value = true;
@@ -133,6 +166,13 @@ function closeDrawer() {
 	background-color: var(--surface-secondary, #ffffff);
 	transition: var(--transition-normal, all 0.3s ease);
 	z-index: 1005 !important; /* Higher than navbar but lower than dialogs */
+}
+
+.drawer-shell {
+	height: 100%;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
 }
 
 /* Styling for the header section of the expanded navigation drawer */
@@ -183,6 +223,63 @@ function closeDrawer() {
 /* Hover effect for all list items in the navigation drawer */
 .v-list-item:hover {
 	background-color: rgba(25, 118, 210, 0.08) !important;
+}
+
+.drawer-footer {
+	padding: 10px 12px 14px;
+	display: grid;
+	gap: 12px;
+}
+
+.drawer-footer-action {
+	width: 100%;
+	border: 1px solid var(--pos-border);
+	border-radius: 16px;
+	background: var(--pos-card-bg);
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 14px;
+	text-align: left;
+	transition:
+		transform 0.18s ease,
+		border-color 0.18s ease,
+		box-shadow 0.18s ease;
+}
+
+.drawer-footer-action:hover {
+	transform: translateY(-1px);
+	border-color: var(--pos-primary);
+	box-shadow: 0 6px 16px var(--pos-shadow);
+}
+
+.drawer-footer-action__icon {
+	width: 36px;
+	height: 36px;
+	border-radius: 12px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: linear-gradient(135deg, #1976d2 0%, #42a5f5 100%);
+	flex-shrink: 0;
+}
+
+.drawer-footer-action__copy {
+	display: grid;
+	gap: 3px;
+	min-width: 0;
+}
+
+.drawer-footer-action__title {
+	font-size: 13px;
+	font-weight: 700;
+	color: var(--pos-text-primary);
+}
+
+.drawer-footer-action__subtitle {
+	font-size: 11px;
+	line-height: 1.35;
+	color: var(--pos-text-secondary);
 }
 
 /* Styling for the actively selected list item in the navigation drawer */

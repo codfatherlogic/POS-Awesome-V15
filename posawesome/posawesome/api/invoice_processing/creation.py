@@ -14,7 +14,7 @@ from posawesome.posawesome.api.invoice_processing.utils import (
     _resolve_effective_price_list,
     _build_invoice_remarks,
     _set_return_valid_upto,
-    get_latest_rate
+    get_latest_rate,
 )
 from posawesome.posawesome.api.invoice_processing.stock import (
     _strip_client_freebies_from_payload,
@@ -24,14 +24,231 @@ from posawesome.posawesome.api.invoice_processing.stock import (
     _merge_duplicate_taxes,
     _auto_set_return_batches,
     _collect_stock_errors,
-    _should_block
 )
 from posawesome.posawesome.api.payment_processing.utils import get_bank_cash_account as get_bank_account
 from posawesome.posawesome.api.utilities import ensure_child_doctype, set_batch_nos_for_bundels
 from posawesome.posawesome.api.payments import redeeming_customer_credit
+from posawesome.posawesome.api.idempotency import (
+    extract_invoice_client_request_id,
+    find_invoice_by_client_request_id,
+    set_invoice_client_request_id,
+    strip_invoice_client_request_id,
+    doctype_supports_client_request_id,
+)
 import json
+import hashlib
 from frappe.utils import money_in_words
 from frappe.utils.background_jobs import enqueue
+
+
+LEDGER_DOCTYPE = "POS Invoice Submission Ledger"
+STATE_RECEIVED = "RECEIVED"
+STATE_DRAFT_CREATED = "DRAFT_CREATED"
+STATE_SUBMITTED = "SUBMITTED"
+STATE_POST_SUBMIT_DONE = "POST_SUBMIT_DONE"
+STATE_FAILED = "FAILED"
+FINAL_LEDGER_STATES = {STATE_SUBMITTED, STATE_POST_SUBMIT_DONE}
+
+
+def _json_dumps(value):
+    try:
+        return json.dumps(value or {}, default=str)
+    except Exception:
+        return "{}"
+
+
+def _json_loads(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return {}
+
+
+def _submission_ledger_key(client_request_id, company, pos_profile, document_type):
+    raw = "|".join(
+        [
+            str(client_request_id or ""),
+            str(company or ""),
+            str(pos_profile or ""),
+            str(document_type or ""),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _resolve_ledger_scope(invoice, data, document_type):
+    invoice = invoice or {}
+    data = data or {}
+    pos_profile = invoice.get("pos_profile") or data.get("pos_profile")
+    company = invoice.get("company") or data.get("company")
+    if not company and pos_profile:
+        try:
+            company = frappe.db.get_value("POS Profile", pos_profile, "company")
+        except Exception:
+            company = None
+    return {
+        "company": company,
+        "pos_profile": pos_profile,
+        "document_type": document_type,
+    }
+
+
+def _get_submission_ledger_by_key(ledger_key):
+    if not ledger_key:
+        return None
+    try:
+        ledger_name = frappe.db.get_value(
+            LEDGER_DOCTYPE,
+            {"ledger_key": ledger_key},
+            "name",
+        )
+        if ledger_name:
+            return frappe.get_doc(LEDGER_DOCTYPE, ledger_name)
+    except Exception:
+        return None
+    return None
+
+
+def _get_submission_ledger(client_request_id, company, pos_profile, document_type):
+    if not client_request_id:
+        return None
+    ledger_key = _submission_ledger_key(
+        client_request_id,
+        company,
+        pos_profile,
+        document_type,
+    )
+    return _get_submission_ledger_by_key(ledger_key)
+
+
+def _save_submission_ledger(ledger_doc):
+    if not ledger_doc:
+        return None
+
+    ledger_name = getattr(ledger_doc, "name", None)
+    ledger_exists = False
+    if ledger_name:
+        try:
+            ledger_exists = bool(frappe.db.exists(LEDGER_DOCTYPE, ledger_name))
+        except Exception:
+            ledger_exists = False
+
+    if hasattr(ledger_doc, "is_new"):
+        if ledger_doc.is_new() and hasattr(ledger_doc, "insert"):
+            ledger_doc.insert(ignore_permissions=True)
+            return ledger_doc
+
+    if ledger_name and not ledger_exists and hasattr(ledger_doc, "insert"):
+        ledger_doc.insert(ignore_permissions=True)
+    elif ledger_name and hasattr(ledger_doc, "save"):
+        ledger_doc.save(ignore_permissions=True)
+    elif hasattr(ledger_doc, "insert"):
+        ledger_doc.insert(ignore_permissions=True)
+    return ledger_doc
+
+
+def _get_submission_ledger_by_name(ledger_name):
+    if not ledger_name:
+        return None
+    try:
+        return frappe.get_doc(LEDGER_DOCTYPE, ledger_name)
+    except Exception:
+        return None
+
+
+def _update_submission_ledger_by_name(ledger_name, state, **fields):
+    ledger_doc = _get_submission_ledger_by_name(ledger_name)
+    if not ledger_doc:
+        return None
+    return _update_submission_ledger(ledger_doc, state, **fields)
+
+
+def _update_submission_ledger(ledger_doc, state, **fields):
+    if not ledger_doc:
+        return None
+    ledger_doc.state = state
+    for key, value in fields.items():
+        if value is not None:
+            setattr(ledger_doc, key, value)
+    return _save_submission_ledger(ledger_doc)
+
+
+def _get_or_create_submission_ledger(client_request_id, invoice, data, document_type):
+    if not client_request_id:
+        return None
+
+    scope = _resolve_ledger_scope(invoice, data, document_type)
+    ledger_key = _submission_ledger_key(
+        client_request_id,
+        scope.get("company"),
+        scope.get("pos_profile"),
+        scope.get("document_type"),
+    )
+    existing = _get_submission_ledger_by_key(ledger_key)
+    if existing:
+        return existing
+
+    payload = {
+        "doctype": LEDGER_DOCTYPE,
+        "name": ledger_key,
+        "ledger_key": ledger_key,
+        "client_request_id": client_request_id,
+        "company": scope.get("company"),
+        "pos_profile": scope.get("pos_profile"),
+        "document_type": scope.get("document_type"),
+        "state": STATE_RECEIVED,
+        "request_data": _json_dumps(data),
+        "invoice_payload": _json_dumps(invoice),
+    }
+    try:
+        ledger_doc = frappe.get_doc(payload)
+        return _save_submission_ledger(ledger_doc)
+    except Exception:
+        return _get_submission_ledger_by_key(ledger_key)
+
+
+def _ledger_response(ledger_doc, replayed=True):
+    if not ledger_doc or not ledger_doc.get("invoice_name"):
+        return None
+    try:
+        invoice_doc = frappe.get_doc(
+            ledger_doc.get("document_type") or "Sales Invoice",
+            ledger_doc.get("invoice_name"),
+        )
+    except Exception:
+        return None
+
+    docstatus = cint(invoice_doc.get("docstatus"))
+    return {
+        "name": invoice_doc.name,
+        "status": docstatus,
+        "docstatus": docstatus,
+        "doctype": invoice_doc.doctype,
+        "replayed": bool(replayed),
+        "idempotent": bool(replayed),
+        "ledger_state": ledger_doc.get("state"),
+        "client_request_id": ledger_doc.get("client_request_id"),
+    }
+
+
+def _ledger_final_replay_response(ledger_doc):
+    if not ledger_doc:
+        return None
+    if ledger_doc.get("state") not in FINAL_LEDGER_STATES:
+        return None
+    return _ledger_response(ledger_doc, replayed=True)
+
+
+def _mark_ledger_failed(ledger_doc, error):
+    return _update_submission_ledger(
+        ledger_doc,
+        STATE_FAILED,
+        error_message=str(error),
+    )
 
 
 def _has_post_submit_payment_work(data):
@@ -40,6 +257,66 @@ def _has_post_submit_payment_work(data):
         or flt((data or {}).get("paid_change"))
         or flt((data or {}).get("credit_change"))
     )
+
+
+def _apply_invoice_gift_card_settlement(invoice_doc, data):
+    from posawesome.posawesome.api.gift_cards import apply_invoice_gift_card_redemptions
+
+    apply_invoice_gift_card_redemptions(
+        invoice_doc,
+        (data or {}).get("gift_card_redemptions") or [],
+    )
+
+
+def _apply_loyalty_redemption_settings(invoice_doc, pos_profile=None):
+    loyalty_amount = flt(invoice_doc.get("loyalty_amount"))
+    loyalty_points = flt(invoice_doc.get("loyalty_points"))
+
+    if not cint(invoice_doc.get("redeem_loyalty_points")) or (loyalty_amount <= 0 and loyalty_points <= 0):
+        invoice_doc.redeem_loyalty_points = 0
+        invoice_doc.loyalty_amount = 0
+        invoice_doc.loyalty_points = 0
+        return
+
+    if not invoice_doc.loyalty_program:
+        invoice_doc.loyalty_program = frappe.db.get_value(
+            "Customer",
+            invoice_doc.customer,
+            "loyalty_program",
+        )
+
+    if not invoice_doc.loyalty_program:
+        frappe.throw(_("Loyalty Program is required to redeem loyalty points."))
+
+    if not invoice_doc.loyalty_redemption_account:
+        invoice_doc.loyalty_redemption_account = frappe.db.get_value(
+            "Loyalty Program",
+            invoice_doc.loyalty_program,
+            "expense_account",
+        )
+
+    if not invoice_doc.loyalty_redemption_account:
+        frappe.throw(
+            _("Please set Expense Account in Loyalty Program {0} before redeeming loyalty points.").format(
+                invoice_doc.loyalty_program
+            )
+        )
+
+    if not invoice_doc.loyalty_redemption_cost_center:
+        invoice_doc.loyalty_redemption_cost_center = (
+            invoice_doc.cost_center
+            or frappe.db.get_value("POS Profile", pos_profile or invoice_doc.pos_profile, "cost_center")
+        )
+
+    if not invoice_doc.loyalty_redemption_cost_center:
+        frappe.throw(
+            _(
+                "Loyalty Redemption Cost Center is required for invoice {0} and POS Profile {1}."
+            ).format(
+                invoice_doc.get("name") or _("unsaved invoice"),
+                pos_profile or invoice_doc.pos_profile or _("unknown"),
+            )
+        )
 
 
 def _run_post_submit_payments(invoice_doc, data, is_payment_entry, total_cash, cash_account, payments):
@@ -66,8 +343,11 @@ def _process_post_submit_payments(
     payments,
     run_async=False,
     user=None,
+    ledger_name=None,
 ):
     if not _has_post_submit_payment_work(data):
+        if ledger_name:
+            _update_submission_ledger_by_name(ledger_name, STATE_POST_SUBMIT_DONE)
         return
 
     if run_async:
@@ -96,11 +376,14 @@ def _process_post_submit_payments(
                 "cash_account": cash_account,
                 "payments": payments,
                 "user": user,
+                "ledger_name": ledger_name,
             },
         )
         return
 
     _run_post_submit_payments(invoice_doc, data, is_payment_entry, total_cash, cash_account, payments)
+    if ledger_name:
+        _update_submission_ledger_by_name(ledger_name, STATE_POST_SUBMIT_DONE)
 
 
 def process_post_submit_payments_job(kwargs):
@@ -112,6 +395,7 @@ def process_post_submit_payments_job(kwargs):
         total_cash = kwargs.get("total_cash")
         cash_account = kwargs.get("cash_account")
         payments = kwargs.get("payments") or []
+        ledger_name = kwargs.get("ledger_name")
 
         invoice_doc = frappe.get_doc(doctype, invoice)
         if invoice_doc.docstatus != 1:
@@ -120,6 +404,8 @@ def process_post_submit_payments_job(kwargs):
         invoice_doc.flags.ignore_permissions = True
         frappe.flags.ignore_account_permission = True
         _run_post_submit_payments(invoice_doc, data, is_payment_entry, total_cash, cash_account, payments)
+        if ledger_name:
+            _update_submission_ledger_by_name(ledger_name, STATE_POST_SUBMIT_DONE)
         user = kwargs.get("user")
         if user and hasattr(frappe, "publish_realtime"):
             frappe.publish_realtime(
@@ -133,6 +419,14 @@ def process_post_submit_payments_job(kwargs):
     except Exception as e:
         frappe.db.rollback()
         error_msg = str(e)
+        ledger_name = kwargs.get("ledger_name")
+        if ledger_name:
+            try:
+                ledger_doc = _get_submission_ledger_by_name(ledger_name)
+                if ledger_doc:
+                    _mark_ledger_failed(ledger_doc, error_msg)
+            except Exception:
+                pass
         frappe.log_error(f"POS Post Submit Payment Processing Failed for {invoice}: {error_msg}")
         user = kwargs.get("user")
         if user and hasattr(frappe, "publish_realtime"):
@@ -222,9 +516,7 @@ def _apply_write_off_settings(invoice_doc, data):
     conversion_rate = flt(invoice_doc.get("conversion_rate") or 1)
 
     invoice_doc.write_off_amount = flt(effective_write_off, precision_write_off)
-    invoice_doc.base_write_off_amount = flt(
-        effective_write_off * conversion_rate, precision_base_write_off
-    )
+    invoice_doc.base_write_off_amount = flt(effective_write_off * conversion_rate, precision_base_write_off)
 
 
 def _safe_date_string(value):
@@ -259,6 +551,23 @@ def _sanitize_delivery_dates(payload):
     for item in items:
         if isinstance(item, dict) and "posa_delivery_date" in item:
             item["posa_delivery_date"] = _safe_date_string(item.get("posa_delivery_date"))
+
+
+def _apply_manual_posting_controls(payload):
+    if not isinstance(payload, dict):
+        return
+
+    posting_date = _safe_date_string(payload.get("posting_date"))
+    if posting_date:
+        payload["posting_date"] = posting_date
+
+    if cint(payload.get("set_posting_time")):
+        payload["set_posting_time"] = 1
+        return
+
+    today = _safe_date_string(nowdate())
+    if posting_date and today and posting_date != today:
+        payload["set_posting_time"] = 1
 
 
 def _build_fresh_invoice_payload(data, doctype):
@@ -356,17 +665,20 @@ def _get_mutable_invoice_doc(data, doctype):
 
     invoice_doc = frappe.get_doc(doctype, invoice_name)
     previous_customer = invoice_doc.get("customer")
-    previous_values = {fieldname: invoice_doc.get(fieldname) for fieldname in (
-        "customer_name",
-        "customer_address",
-        "address_display",
-        "shipping_address_name",
-        "contact_person",
-        "contact_display",
-        "contact_mobile",
-        "contact_email",
-        "territory",
-    )}
+    previous_values = {
+        fieldname: invoice_doc.get(fieldname)
+        for fieldname in (
+            "customer_name",
+            "customer_address",
+            "address_display",
+            "shipping_address_name",
+            "contact_person",
+            "contact_display",
+            "contact_mobile",
+            "contact_email",
+            "territory",
+        )
+    }
     if cint(invoice_doc.docstatus) != 0:
         fresh_payload = _build_fresh_invoice_payload(data, doctype)
         fresh_payload = _clear_stale_party_fields_in_payload(
@@ -412,9 +724,7 @@ def _save_draft_with_latest_timestamp(invoice_doc, retries=2):
             current_state.pop("__last_sync_on", None)
             current_state.pop("doctype", None)
             latest_doc.update(current_state)
-            latest_doc.flags.ignore_permissions = getattr(
-                invoice_doc.flags, "ignore_permissions", False
-            )
+            latest_doc.flags.ignore_permissions = getattr(invoice_doc.flags, "ignore_permissions", False)
             invoice_doc = latest_doc
 
 
@@ -434,11 +744,31 @@ def _resolve_payment_amounts(payment, conversion_rate=1):
     return amount, base_amount
 
 
+def _normalize_return_payment_rows(invoice_doc, conversion_rate=1):
+    if not invoice_doc.is_return:
+        return
+
+    for payment in invoice_doc.payments or []:
+        resolved_amount, resolved_base_amount = _resolve_payment_amounts(
+            payment,
+            invoice_doc.get("conversion_rate") or conversion_rate,
+        )
+        payment.amount = -abs(resolved_amount)
+        payment.base_amount = -abs(resolved_base_amount)
+
+    invoice_doc.paid_amount = flt(sum(p.amount for p in invoice_doc.payments or []))
+    invoice_doc.base_paid_amount = flt(sum(p.base_amount for p in invoice_doc.payments or []))
+
+
 @frappe.whitelist()
 def update_invoice(data):
     currency_cache = {}
     data = json.loads(data)
+    client_request_id = extract_invoice_client_request_id(data)
+    if not doctype_supports_client_request_id(data.get("doctype") or "Sales Invoice"):
+        strip_invoice_client_request_id(data)
     _sanitize_delivery_dates(data)
+    _apply_manual_posting_controls(data)
     _strip_client_freebies_from_payload(data)
     # Determine doctype based on POS Profile setting
     pos_profile = data.get("pos_profile")
@@ -454,12 +784,14 @@ def update_invoice(data):
     return_validity_enabled, default_validity_days = _get_return_validity_settings(pos_profile)
 
     invoice_doc = _get_mutable_invoice_doc(data, doctype)
+    set_invoice_client_request_id(invoice_doc, client_request_id)
 
     # Set currency from data before set_missing_values
     # Validate return items if this is a return invoice
     if (data.get("is_return") or invoice_doc.is_return) and invoice_doc.get("return_against"):
         # We need to import this here to avoid circular imports if possible, or just import it at top if safe
         from posawesome.posawesome.api.invoice_processing.returns import validate_return_items
+
         validation = validate_return_items(
             invoice_doc.return_against,
             [d.as_dict() for d in invoice_doc.items],
@@ -496,7 +828,9 @@ def update_invoice(data):
             invoice_doc.customer,
             "customer_name",
         )
-        invoice_doc.customer_name = resolved_customer_name or invoice_doc.get("customer_name") or invoice_doc.customer
+        invoice_doc.customer_name = (
+            resolved_customer_name or invoice_doc.get("customer_name") or invoice_doc.customer
+        )
 
     effective_price_list = _resolve_effective_price_list(
         invoice_doc.get("customer"),
@@ -551,8 +885,7 @@ def update_invoice(data):
         invoice_doc.calculate_taxes_and_totals()
 
     company_currency = (
-        frappe.get_cached_value("Company", invoice_doc.company, "default_currency")
-        or invoice_doc.currency
+        frappe.get_cached_value("Company", invoice_doc.company, "default_currency") or invoice_doc.currency
     )
 
     # Ensure selected currency is preserved after set_missing_values
@@ -638,18 +971,7 @@ def update_invoice(data):
             else:
                 tax.included_in_print_rate = 1 if inclusive else 0
 
-    # For return invoices, payments should be negative amounts
-    if invoice_doc.is_return:
-        for payment in invoice_doc.payments:
-            resolved_amount, resolved_base_amount = _resolve_payment_amounts(
-                payment,
-                invoice_doc.get("conversion_rate") or conversion_rate,
-            )
-            payment.amount = -abs(resolved_amount)
-            payment.base_amount = -abs(resolved_base_amount)
-
-        invoice_doc.paid_amount = flt(sum(p.amount for p in invoice_doc.payments))
-        invoice_doc.base_paid_amount = flt(sum(p.base_amount for p in invoice_doc.payments))
+    _normalize_return_payment_rows(invoice_doc, conversion_rate)
 
     invoice_doc.flags.ignore_permissions = True
     frappe.flags.ignore_account_permission = True
@@ -668,7 +990,9 @@ def update_invoice(data):
 def submit_invoice(invoice, data, submit_in_background=False):
     data = json.loads(data)
     invoice = json.loads(invoice)
+    client_request_id = extract_invoice_client_request_id(invoice, data)
     _sanitize_delivery_dates(invoice)
+    _apply_manual_posting_controls(invoice)
     submit_in_background = cint(submit_in_background)
     _strip_client_freebies_from_payload(invoice)
     pos_profile = invoice.get("pos_profile")
@@ -678,6 +1002,50 @@ def submit_invoice(invoice, data, submit_in_background=False):
     ):
         doctype = "POS Invoice"
 
+    if not doctype_supports_client_request_id(doctype):
+        strip_invoice_client_request_id(invoice)
+
+    ledger_doc = _get_or_create_submission_ledger(client_request_id, invoice, data, doctype)
+    replay_response = _ledger_final_replay_response(ledger_doc)
+    if replay_response:
+        return replay_response
+
+    existing_by_request = find_invoice_by_client_request_id(client_request_id, preferred_doctype=doctype)
+    if existing_by_request:
+        if cint(existing_by_request.docstatus) == 1:
+            if ledger_doc:
+                _update_submission_ledger(
+                    ledger_doc,
+                    STATE_POST_SUBMIT_DONE,
+                    invoice_name=existing_by_request.name,
+                )
+            return {
+                "name": existing_by_request.name,
+                "status": existing_by_request.docstatus,
+                "docstatus": existing_by_request.docstatus,
+                "doctype": existing_by_request.doctype,
+                "replayed": True,
+                "idempotent": True,
+                "ledger_state": ledger_doc.get("state") if ledger_doc else STATE_POST_SUBMIT_DONE,
+                "client_request_id": client_request_id,
+            }
+        invoice["name"] = existing_by_request.name
+        doctype = existing_by_request.doctype
+    elif ledger_doc and ledger_doc.get("invoice_name"):
+        ledger_invoice_name = ledger_doc.get("invoice_name")
+        if frappe.db.exists(doctype, ledger_invoice_name):
+            ledger_invoice = frappe.get_doc(doctype, ledger_invoice_name)
+            if cint(ledger_invoice.docstatus) == 1:
+                _update_submission_ledger(
+                    ledger_doc,
+                    STATE_POST_SUBMIT_DONE,
+                    invoice_name=ledger_invoice.name,
+                )
+                replay_response = _ledger_response(ledger_doc, replayed=True)
+                if replay_response:
+                    return replay_response
+            invoice["name"] = ledger_invoice.name
+
     invoice_name = invoice.get("name")
     if invoice_name and frappe.db.exists(doctype, invoice_name):
         existing_doc = frappe.get_doc(doctype, invoice_name)
@@ -686,6 +1054,8 @@ def submit_invoice(invoice, data, submit_in_background=False):
             invoice_name = None
 
     if not invoice_name or not frappe.db.exists(doctype, invoice_name):
+        if client_request_id:
+            invoice["posa_client_request_id"] = client_request_id
         created = update_invoice(json.dumps(invoice))
         invoice_name = created.get("name")
         invoice_doc = frappe.get_doc(doctype, invoice_name)
@@ -696,21 +1066,19 @@ def submit_invoice(invoice, data, submit_in_background=False):
         invoice_doc = frappe.get_doc(doctype, invoice_name)
         invoice_doc.update(invoice)
 
+    set_invoice_client_request_id(invoice_doc, client_request_id)
+    if ledger_doc:
+        _update_submission_ledger(
+            ledger_doc,
+            STATE_DRAFT_CREATED,
+            invoice_name=invoice_doc.name,
+            request_data=_json_dumps(data),
+            invoice_payload=_json_dumps(invoice),
+        )
+
     _deduplicate_free_items(invoice_doc)
 
-    if invoice_doc.redeem_loyalty_points and not invoice_doc.loyalty_program:
-        invoice_doc.loyalty_program = frappe.db.get_value("Customer", invoice_doc.customer, "loyalty_program")
-
-    if invoice_doc.redeem_loyalty_points and invoice_doc.loyalty_program:
-        if not invoice_doc.loyalty_redemption_account:
-            invoice_doc.loyalty_redemption_account = frappe.db.get_value(
-                "Loyalty Program", invoice_doc.loyalty_program, "expense_account"
-            )
-
-        if not invoice_doc.loyalty_redemption_cost_center:
-            invoice_doc.loyalty_redemption_cost_center = invoice_doc.cost_center or frappe.db.get_value(
-                "POS Profile", pos_profile, "cost_center"
-            )
+    _apply_loyalty_redemption_settings(invoice_doc, pos_profile)
 
     # Ensure item name overrides are respected on submit
     _apply_item_name_overrides(invoice_doc)
@@ -736,6 +1104,7 @@ def submit_invoice(invoice, data, submit_in_background=False):
         invoice_total = flt(invoice_doc.rounded_total or invoice_doc.grand_total)
         settled_without_cash = (
             flt(data.get("redeemed_customer_credit"))
+            + sum(flt(row.get("amount")) for row in (data.get("gift_card_redemptions") or []))
             + flt(invoice_doc.get("loyalty_amount"))
             + flt(invoice_doc.get("write_off_amount"))
         )
@@ -769,7 +1138,14 @@ def submit_invoice(invoice, data, submit_in_background=False):
                 invoice_doc.is_pos = 0
                 is_payment_entry = 1
 
-    payments = invoice_doc.payments
+    _apply_invoice_gift_card_settlement(invoice_doc, data)
+    _normalize_return_payment_rows(invoice_doc, invoice_doc.get("conversion_rate") or 1)
+
+    payments = [
+        row
+        for row in (invoice_doc.payments or [])
+        if str(row.get("mode_of_payment") or "").strip() != "Gift Card"
+    ]
 
     _auto_set_return_batches(invoice_doc)
 
@@ -785,6 +1161,7 @@ def submit_invoice(invoice, data, submit_in_background=False):
     frappe.flags.ignore_account_permission = True
     invoice_doc.posa_is_printed = 1
     invoice_doc = _save_draft_with_latest_timestamp(invoice_doc)
+    _normalize_return_payment_rows(invoice_doc, invoice_doc.get("conversion_rate") or 1)
 
     if data.get("due_date"):
         frappe.db.set_value(
@@ -800,6 +1177,20 @@ def submit_invoice(invoice, data, submit_in_background=False):
         invoice_doc.pos_profile,
         "posa_allow_submissions_in_background_job",
     )
+    if ledger_doc:
+        _update_submission_ledger(
+            ledger_doc,
+            STATE_DRAFT_CREATED,
+            invoice_name=invoice_doc.name,
+            payment_context=_json_dumps(
+                {
+                    "is_payment_entry": is_payment_entry,
+                    "total_cash": total_cash,
+                    "cash_account": cash_account,
+                    "payments": payments,
+                }
+            ),
+        )
 
     if submit_in_background and allow_background_submit:
         enqueue(
@@ -807,6 +1198,7 @@ def submit_invoice(invoice, data, submit_in_background=False):
             queue="default",
             timeout=3000,
             is_async=True,
+            enqueue_after_commit=True,
             kwargs={
                 "invoice": invoice_doc.name,
                 "doctype": invoice_doc.doctype,
@@ -816,10 +1208,25 @@ def submit_invoice(invoice, data, submit_in_background=False):
                 "cash_account": cash_account,
                 "payments": payments,
                 "user": getattr(getattr(frappe, "session", None), "user", None),
+                "ledger_name": ledger_doc.name if ledger_doc else None,
             },
         )
     else:
         invoice_doc.submit()
+        if ledger_doc:
+            _update_submission_ledger(
+                ledger_doc,
+                STATE_SUBMITTED,
+                invoice_name=invoice_doc.name,
+                payment_context=_json_dumps(
+                    {
+                        "is_payment_entry": is_payment_entry,
+                        "total_cash": total_cash,
+                        "cash_account": cash_account,
+                        "payments": payments,
+                    }
+                ),
+            )
         _process_post_submit_payments(
             invoice_doc,
             data,
@@ -827,11 +1234,20 @@ def submit_invoice(invoice, data, submit_in_background=False):
             total_cash,
             cash_account,
             payments,
-            run_async=bool(allow_background_submit),
-            user=getattr(getattr(frappe, "session", None), "user", None),
+            bool(allow_background_submit),
+            getattr(getattr(frappe, "session", None), "user", None),
+            ledger_doc.name if ledger_doc else None,
         )
 
-    return {"name": invoice_doc.name, "status": invoice_doc.docstatus}
+    return {
+        "name": invoice_doc.name,
+        "status": invoice_doc.docstatus,
+        "docstatus": invoice_doc.docstatus,
+        "doctype": invoice_doc.doctype,
+        "ledger_state": ledger_doc.get("state") if ledger_doc else None,
+        "client_request_id": client_request_id,
+        "idempotent": bool(client_request_id),
+    }
 
 
 def submit_in_background_job(kwargs):
@@ -844,10 +1260,18 @@ def submit_in_background_job(kwargs):
         cash_account = kwargs.get("cash_account")
         payments = kwargs.get("payments") or []
         user = kwargs.get("user") or getattr(getattr(frappe, "session", None), "user", None)
+        ledger_name = kwargs.get("ledger_name")
+        ledger_doc = _get_submission_ledger_by_name(ledger_name) if ledger_name else None
 
         invoice_doc = frappe.get_doc(doctype, invoice)
 
         if invoice_doc.docstatus == 1:
+            if ledger_doc:
+                _update_submission_ledger(
+                    ledger_doc,
+                    STATE_SUBMITTED,
+                    invoice_name=invoice_doc.name,
+                )
             return
 
         invoice_doc.flags.ignore_permissions = True
@@ -862,23 +1286,21 @@ def submit_in_background_job(kwargs):
 
         _apply_write_off_settings(invoice_doc, data)
 
-        if invoice_doc.redeem_loyalty_points and not invoice_doc.loyalty_program:
-            invoice_doc.loyalty_program = frappe.db.get_value(
-                "Customer", invoice_doc.customer, "loyalty_program"
-            )
+        _apply_loyalty_redemption_settings(invoice_doc, invoice_doc.pos_profile)
 
-        if invoice_doc.redeem_loyalty_points and invoice_doc.loyalty_program:
-            if not invoice_doc.loyalty_redemption_account:
-                invoice_doc.loyalty_redemption_account = frappe.db.get_value(
-                    "Loyalty Program", invoice_doc.loyalty_program, "expense_account"
-                )
-
-            if not invoice_doc.loyalty_redemption_cost_center:
-                invoice_doc.loyalty_redemption_cost_center = invoice_doc.cost_center
+        _apply_invoice_gift_card_settlement(invoice_doc, data)
+        _normalize_return_payment_rows(invoice_doc, invoice_doc.get("conversion_rate") or 1)
 
         invoice_doc = _save_draft_with_latest_timestamp(invoice_doc)
+        _normalize_return_payment_rows(invoice_doc, invoice_doc.get("conversion_rate") or 1)
 
         invoice_doc.submit()
+        if ledger_doc:
+            _update_submission_ledger(
+                ledger_doc,
+                STATE_SUBMITTED,
+                invoice_name=invoice_doc.name,
+            )
         if hasattr(frappe, "publish_realtime"):
             frappe.publish_realtime(
                 "pos_invoice_processed",
@@ -896,13 +1318,22 @@ def submit_in_background_job(kwargs):
             total_cash,
             cash_account,
             payments,
-            run_async=True,
-            user=user,
+            True,
+            user,
+            ledger_name,
         )
 
     except Exception as e:
         frappe.db.rollback()
         error_msg = str(e)
+        ledger_name = kwargs.get("ledger_name")
+        if ledger_name:
+            try:
+                ledger_doc = _get_submission_ledger_by_name(ledger_name)
+                if ledger_doc:
+                    _mark_ledger_failed(ledger_doc, error_msg)
+            except Exception:
+                pass
         frappe.log_error(f"POS Background Submission Failed for {invoice}: {error_msg}")
         frappe.publish_realtime(
             "pos_invoice_submit_error",
@@ -910,12 +1341,87 @@ def submit_in_background_job(kwargs):
             user=user,
         )
 
+
+@frappe.whitelist()
+def repair_invoice_submission(client_request_id, company, pos_profile, document_type="Sales Invoice"):
+    """Reconcile an incomplete durable submission ledger row without creating a new invoice."""
+
+    client_request_id = (client_request_id or "").strip()
+    if not client_request_id:
+        frappe.throw(_("client_request_id is required"))
+
+    ledger_doc = _get_submission_ledger(
+        client_request_id,
+        company,
+        pos_profile,
+        document_type,
+    )
+    if not ledger_doc:
+        frappe.throw(_("No invoice submission ledger found for this request"))
+
+    invoice_name = ledger_doc.get("invoice_name")
+    if not invoice_name:
+        existing_invoice = find_invoice_by_client_request_id(
+            client_request_id,
+            preferred_doctype=document_type,
+        )
+        if existing_invoice:
+            invoice_name = existing_invoice.name
+            _update_submission_ledger(ledger_doc, STATE_DRAFT_CREATED, invoice_name=invoice_name)
+
+    if not invoice_name or not frappe.db.exists(document_type, invoice_name):
+        return {
+            "client_request_id": client_request_id,
+            "ledger_state": ledger_doc.get("state"),
+            "repaired": False,
+            "message": _("No linked invoice was found for this ledger row"),
+        }
+
+    invoice_doc = frappe.get_doc(document_type, invoice_name)
+    if cint(invoice_doc.get("docstatus")) == 1:
+        context = _json_loads(ledger_doc.get("payment_context"))
+        data = _json_loads(ledger_doc.get("request_data"))
+        _update_submission_ledger(ledger_doc, STATE_SUBMITTED, invoice_name=invoice_doc.name)
+        _process_post_submit_payments(
+            invoice_doc,
+            data,
+            context.get("is_payment_entry"),
+            context.get("total_cash"),
+            context.get("cash_account"),
+            context.get("payments") or [],
+            False,
+            getattr(getattr(frappe, "session", None), "user", None),
+            ledger_doc.name,
+        )
+        _update_submission_ledger(ledger_doc, STATE_POST_SUBMIT_DONE, invoice_name=invoice_doc.name)
+        return {
+            "name": invoice_doc.name,
+            "status": invoice_doc.docstatus,
+            "docstatus": invoice_doc.docstatus,
+            "doctype": invoice_doc.doctype,
+            "ledger_state": ledger_doc.get("state"),
+            "client_request_id": client_request_id,
+            "repaired": True,
+            "idempotent": True,
+        }
+
+    return {
+        "name": invoice_doc.name,
+        "status": invoice_doc.docstatus,
+        "docstatus": invoice_doc.docstatus,
+        "doctype": invoice_doc.doctype,
+        "ledger_state": ledger_doc.get("state"),
+        "client_request_id": client_request_id,
+        "repaired": False,
+        "message": _("Linked invoice is still a draft"),
+    }
+
+
 @frappe.whitelist()
 def validate_cart_items(items, pos_profile=None):
     """Validate cart items for available stock.
 
-    Returns a list of item dicts where requested quantity exceeds availability.
-    This can be used on the front-end for pre-submission checks.
+    Returns blocking errors and warning-only shortages for front-end checks.
     """
 
     if isinstance(items, str):
@@ -924,11 +1430,18 @@ def validate_cart_items(items, pos_profile=None):
     if pos_profile and not frappe.db.exists("POS Profile", pos_profile):
         pos_profile = None
 
-    if not _should_block(pos_profile):
-        return []
+    errors = _collect_stock_errors(
+        items,
+        pos_profile=pos_profile,
+        include_warnings=True,
+    )
+    blocking_errors = [row for row in errors if row.get("policy") == "block"]
+    warnings = [row for row in errors if row.get("policy") != "block"]
 
-    errors = _collect_stock_errors(items)
-    if not errors:
-        return []
-
-    return errors
+    return {
+        "mode": "block" if blocking_errors else ("warn" if warnings else "allow"),
+        "errors": blocking_errors,
+        "warnings": warnings,
+        "items": errors,
+        "should_block": bool(blocking_errors),
+    }

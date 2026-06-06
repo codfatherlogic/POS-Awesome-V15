@@ -6,9 +6,17 @@
 					<p class="payment-method-card__label">{{ frappe._("Method") }}</p>
 					<h4 class="payment-method-card__title">{{ payment.mode_of_payment }}</h4>
 				</div>
-				<span v-if="payment.default === 1" class="payment-method-card__badge">
-					{{ __("Default") }}
-				</span>
+				<div class="payment-method-card__badges">
+					<span
+						v-if="isReturn"
+						class="payment-method-card__badge payment-method-card__badge--refund"
+					>
+						{{ __("Refund") }}
+					</span>
+					<span v-if="payment.default === 1" class="payment-method-card__badge">
+						{{ __("Default") }}
+					</span>
+				</div>
 			</div>
 
 			<v-row class="payments ma-0" dense>
@@ -16,28 +24,31 @@
 					<v-text-field
 						density="compact"
 						variant="solo"
-						color="primary"
+						:color="isReturn ? 'error' : 'primary'"
 						:label="frappe._('Amount')"
-						class="sleek-field pos-themed-input"
+						:class="['sleek-field pos-themed-input', isReturn ? 'pos-themed-input--refund' : '']"
 						hide-details
 						:model-value="formatCurrency(payment.amount)"
 						@change="$emit('update-amount', payment, $event)"
 						:rules="[isNumber]"
 						:prefix="currencySymbol(currency)"
-						@focus="$emit('set-rest-amount', payment)"
-						:readonly="isReturn"
+						@focus="$emit('set-rest-amount', payment, isReturn)"
+						:readonly="isGiftCardPayment(payment)"
 					></v-text-field>
 				</v-col>
 				<v-col cols="12" md="5" v-if="!isMpesaC2bPayment(payment)">
-					<v-btn
-						block
-						color="primary"
-						variant="flat"
-						class="payment-method-action-btn"
-						@click="$emit('set-full-amount', payment)"
-					>
-						{{ payment.mode_of_payment }}
-					</v-btn>
+					<div class="payment-method-actions">
+						<v-btn
+							block
+							color="primary"
+							variant="flat"
+							class="payment-method-action-btn"
+							:data-test="`payment-method-action-${payment.mode_of_payment}`"
+							@click="handlePrimaryAction(payment)"
+						>
+							{{ isGiftCardPayment(payment) ? __("Redeem / Scan") : payment.mode_of_payment }}
+						</v-btn>
+					</div>
 				</v-col>
 
 				<v-col
@@ -98,7 +109,10 @@
 </template>
 
 <script setup>
-defineProps({
+const frappe = window.frappe;
+const __ = window.__;
+
+const props = defineProps({
 	payments: Array,
 	currency: String,
 	isReturn: Boolean,
@@ -109,19 +123,29 @@ defineProps({
 	getVisibleDenominations: Function,
 	isCashLikePayment: Function,
 	isMpesaC2bPayment: Function,
+	isGiftCardPayment: {
+		type: Function,
+		default: () => false,
+	},
 });
 
-defineEmits([
+const emit = defineEmits([
 	"update-amount",
 	"set-full-amount",
 	"set-denomination",
 	"mpesa-dialog",
 	"request-payment",
 	"set-rest-amount",
+	"open-gift-card",
 ]);
 
-const frappe = window.frappe;
-const __ = window.__;
+const handlePrimaryAction = (payment) => {
+	if (props.isGiftCardPayment(payment)) {
+		emit("open-gift-card", payment);
+		return;
+	}
+	emit("set-full-amount", payment, props.isReturn);
+};
 </script>
 
 <style scoped>
@@ -165,6 +189,14 @@ const __ = window.__;
 	color: var(--pos-text-primary);
 }
 
+.payment-method-card__badges {
+	display: flex;
+	gap: var(--pos-space-1);
+	align-items: center;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+}
+
 .payment-method-card__badge {
 	padding: 6px 10px;
 	border-radius: 999px;
@@ -173,6 +205,16 @@ const __ = window.__;
 	font-size: 0.78rem;
 	font-weight: 700;
 	white-space: nowrap;
+}
+
+.payment-method-card__badge--refund {
+	background: rgba(var(--v-theme-error), 0.12);
+	color: rgb(var(--v-theme-error));
+}
+
+:deep(.pos-themed-input--refund input) {
+	color: rgb(var(--v-theme-error)) !important;
+	font-weight: 700;
 }
 
 .payment-method-action-btn {
@@ -188,6 +230,10 @@ const __ = window.__;
 		transform 0.18s ease !important;
 	background-color: rgb(var(--v-theme-primary)) !important;
 	color: #ffffff !important;
+}
+
+.payment-method-actions {
+	display: block;
 }
 
 .payment-method-action-btn:hover,
@@ -249,6 +295,10 @@ const __ = window.__;
 	.payment-method-card {
 		padding: var(--pos-space-2);
 		gap: var(--pos-space-2);
+	}
+
+	.payment-method-actions {
+		grid-template-columns: 1fr;
 	}
 }
 </style>

@@ -250,15 +250,21 @@ export function useFormat() {
 	/**
 	 * Formats a value as currency.
 	 */
-	const formatCurrency = (value: any, precision?: number): string => {
+	const formatCurrency = (value: any, currencyOrPrecision?: string | number, precision?: number): string => {
 		const val = value === null || value === undefined ? 0 : value;
 		let number = Number(fromArabicNumerals(String(val)).replace(/,/g, ""));
 		if (isNaN(number)) number = 0;
 
-		let prec =
-			precision !== undefined
-				? Number(precision)
-				: Number(currency_precision.value);
+		let currency: string | undefined;
+		let prec: number;
+
+		if (typeof currencyOrPrecision === "string") {
+			currency = currencyOrPrecision;
+			prec = precision !== undefined ? Number(precision) : Number(currency_precision.value);
+		} else {
+			prec = currencyOrPrecision !== undefined ? Number(currencyOrPrecision) : Number(currency_precision.value);
+		}
+
 		if (!Number.isInteger(prec) || prec < 0 || prec > 20) {
 			prec = Math.min(Math.max(prec || 2, 0), 20);
 		}
@@ -270,7 +276,13 @@ export function useFormat() {
 			useGrouping: true,
 		});
 
-		return toArabicNumerals(formatted);
+		formatted = toArabicNumerals(formatted);
+
+		if (currency) {
+			formatted = `${currencySymbol(currency)}${formatted}`;
+		}
+
+		return formatted;
 	};
 
 	/**
@@ -400,16 +412,23 @@ export default {
 				rounding_method || "Banker's Rounding (legacy)",
 			);
 		},
-		formatCurrency(this: any, value: any, precision?: number): string {
+		formatCurrency(this: any, value: any, currencyOrPrecision?: string | number, precision?: number): string {
 			const val = value === null || value === undefined ? 0 : value;
 			let number = Number(
 				fromArabicNumerals(String(val)).replace(/,/g, ""),
 			);
 			if (isNaN(number)) number = 0;
-			let prec =
-				precision !== undefined
-					? Number(precision)
-					: Number(this.currency_precision || 2);
+
+			let currency: string | undefined;
+			let prec: number;
+
+			if (typeof currencyOrPrecision === "string") {
+				currency = currencyOrPrecision;
+				prec = precision !== undefined ? Number(precision) : Number(this.currency_precision || 2);
+			} else {
+				prec = currencyOrPrecision !== undefined ? Number(currencyOrPrecision) : Number(this.currency_precision || 2);
+			}
+
 			if (!Number.isInteger(prec) || prec < 0 || prec > 20) {
 				prec = Math.min(Math.max(prec || 2, 0), 20);
 			}
@@ -419,7 +438,13 @@ export default {
 				maximumFractionDigits: prec,
 				useGrouping: true,
 			});
-			return toArabicNumerals(formatted);
+			formatted = toArabicNumerals(formatted);
+
+			if (currency) {
+				formatted = `${this.currencySymbol(currency)}${formatted}`;
+			}
+
+			return formatted;
 		},
 		formatFloat(this: any, value: any, precision?: number): string {
 			const val = value === null || value === undefined ? 0 : value;

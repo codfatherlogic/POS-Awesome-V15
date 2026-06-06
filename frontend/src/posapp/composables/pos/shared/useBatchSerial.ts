@@ -1,3 +1,20 @@
+export const getDisplayableBatchOptions = (batchList: any): any[] => {
+	if (!Array.isArray(batchList)) {
+		return [];
+	}
+
+	return batchList.filter((batch) => {
+		if (!batch?.batch_no) {
+			return false;
+		}
+
+		const rawAvailableQty =
+			batch.available_qty ?? batch.batch_qty ?? batch.original_batch_qty;
+		const availableQty = Number(rawAvailableQty);
+		return Number.isFinite(availableQty) && availableQty > 0;
+	});
+};
+
 export function useBatchSerial() {
 	const normalizeSerialSelection = (item: any) => {
 		if (!Array.isArray(item.serial_no_selected)) {
@@ -91,7 +108,9 @@ export function useBatchSerial() {
 
 		if (
 			sanitizedSelection.length !== currentSelection.length ||
-			sanitizedSelection.some((serial, index) => serial !== currentSelection[index])
+			sanitizedSelection.some(
+				(serial, index) => serial !== currentSelection[index],
+			)
 		) {
 			item.serial_no_selected = sanitizedSelection;
 		}
@@ -195,17 +214,19 @@ export function useBatchSerial() {
 			}
 		});
 
-		console.debug("[POS BatchFlow] Calculated batch availability", {
-			item_code: item?.item_code,
-			row_id: item?.posa_row_id,
-			batches: normalized_batch_data.map((batch) => ({
-				batch_no: batch.batch_no,
-				available_qty: batch.available_qty,
-				remaining_qty: batch.remaining_qty,
-				used_qty: batch.used_qty,
-				is_expired: batch.is_expired,
-			})),
-		});
+		if ((globalThis as any).__POSAWESOME_DEBUG_BATCH_FLOW__ === true) {
+			console.debug("[POS BatchFlow] Calculated batch availability", {
+				item_code: item?.item_code,
+				row_id: item?.posa_row_id,
+				batches: normalized_batch_data.map((batch) => ({
+					batch_no: batch.batch_no,
+					available_qty: batch.available_qty,
+					remaining_qty: batch.remaining_qty,
+					used_qty: batch.used_qty,
+					is_expired: batch.is_expired,
+				})),
+			});
+		}
 
 		return normalized_batch_data;
 	};
@@ -217,6 +238,7 @@ export function useBatchSerial() {
 		update = true,
 		context: any,
 	) => {
+		const flt = context.flt || ((v: unknown) => Number(v));
 		const normalized_batch_data: any[] = getBatchAvailability(
 			item,
 			context,
@@ -247,35 +269,35 @@ export function useBatchSerial() {
 			item.actual_batch_qty = batch_to_use.available_qty;
 			item.batch_no_expiry_date = batch_to_use.expiry_date;
 			item.batch_no_is_expired = batch_to_use.is_expired;
-			console.debug("[POS BatchFlow] Selected batch for line", {
-				item_code: item?.item_code,
-				row_id: item?.posa_row_id,
-				batch_no: item.batch_no,
-				available_qty: batch_to_use.available_qty,
-				update,
-			});
+			if ((globalThis as any).__POSAWESOME_DEBUG_BATCH_FLOW__ === true) {
+				console.debug("[POS BatchFlow] Selected batch for line", {
+					item_code: item?.item_code,
+					row_id: item?.posa_row_id,
+					batch_no: item.batch_no,
+					available_qty: batch_to_use.available_qty,
+					update,
+				});
+			}
 
-			const hasPriceListRate =
-				item.price_list_rate !== undefined &&
-				item.price_list_rate !== null &&
-				Number(item.price_list_rate) !== 0;
-			const shouldApplyBatchPrice =
-				batch_to_use.batch_price && (update || !hasPriceListRate);
+			const parsedBatchPrice = Number(batch_to_use.batch_price);
+			const hasBatchPrice =
+				Number.isFinite(parsedBatchPrice) && parsedBatchPrice > 0;
+			const shouldApplyBatchPrice = hasBatchPrice;
 
 			if (shouldApplyBatchPrice) {
 				// Store batch price in base currency
-				item.base_batch_price = batch_to_use.batch_price;
+				item.base_batch_price = parsedBatchPrice;
 
 				// Convert batch price to selected currency if needed
 				const baseCurrency =
 					context.price_list_currency || context.pos_profile.currency;
 				if (context.selected_currency !== baseCurrency) {
-					item.batch_price = context.flt(
-						batch_to_use.batch_price / context.exchange_rate,
+					item.batch_price = flt(
+						parsedBatchPrice / context.exchange_rate,
 						context.currency_precision,
 					);
 				} else {
-					item.batch_price = batch_to_use.batch_price;
+					item.batch_price = parsedBatchPrice;
 				}
 
 				// Set rates based on batch price
@@ -296,11 +318,11 @@ export function useBatchSerial() {
 				item.base_discount_amount = 0;
 
 				// Calculate final amounts
-				item.amount = context.flt(
+				item.amount = flt(
 					item.qty * item.rate,
 					context.currency_precision,
 				);
-				item.base_amount = context.flt(
+				item.base_amount = flt(
 					item.qty * item.base_rate,
 					context.currency_precision,
 				);
@@ -350,5 +372,6 @@ export function useBatchSerial() {
 		setSerialNo,
 		setBatchQty,
 		getBatchAvailability,
+		getDisplayableBatchOptions,
 	};
 }

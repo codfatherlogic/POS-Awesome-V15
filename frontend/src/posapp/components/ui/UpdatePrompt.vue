@@ -44,7 +44,9 @@
 							<span class="commit-hash" v-if="commit.commit_short">
 								{{ commit.commit_short }}
 							</span>
-							<span class="commit-message">{{ commit.commit_message || commit.commit_hash }}</span>
+							<span class="commit-message">{{
+								commit.commit_message || commit.commit_hash
+							}}</span>
 							<span class="commit-date" v-if="commit.commit_date">
 								{{ commit.commit_date }}
 							</span>
@@ -53,13 +55,18 @@
 				</div>
 			</v-card-text>
 			<v-card-actions class="update-actions">
-				<v-spacer></v-spacer>
 				<v-btn
-					variant="flat"
+					v-if="releaseUrl"
+					variant="text"
 					color="primary"
-					:loading="updateStore.reloading"
-					@click="reloadNow"
+					:href="releaseUrl"
+					target="_blank"
+					rel="noopener noreferrer"
 				>
+					{{ __("Release Notes") }}
+				</v-btn>
+				<v-spacer></v-spacer>
+				<v-btn variant="flat" color="primary" :loading="updateStore.reloading" @click="reloadNow">
 					{{ __("Reload Now") }}
 				</v-btn>
 				<v-btn variant="elevated" color="primary" @click="dismiss">
@@ -73,14 +80,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useUpdateStore } from "../../stores/updateStore";
-import { useRtl } from "../../composables/core/useRtl";
 
 defineOptions({
 	name: "UpdatePrompt",
 });
 
 const updateStore = useUpdateStore();
-const { isRtl } = useRtl();
 const visible = ref(false);
 
 // @ts-ignore
@@ -98,6 +103,7 @@ const label = computed(() => updateStore.formattedAvailableVersion);
 const detail = computed(() => updateStore.formattedAvailableDetails);
 const branch = computed(() => updateStore.formattedAvailableBranch);
 const commits = computed(() => updateStore.formattedAvailableCommits);
+const releaseUrl = computed(() => updateStore.availableReleaseUrl);
 
 function dismiss() {
 	updateStore.dismissUpdate();

@@ -12,7 +12,7 @@ from posawesome.posawesome.api.payment_processing.creation import create_payment
 from posawesome.posawesome.api.payment_processing.utils import (
     get_bank_cash_account,
     set_paid_amount_and_received_amount,
-    get_party_account
+    get_party_account,
 )
 from posawesome.posawesome.api.payment_processing.data import (
     get_outstanding_invoices,

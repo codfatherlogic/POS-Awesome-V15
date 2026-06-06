@@ -11,6 +11,7 @@ from frappe.utils import (
 from posawesome.posawesome.api.invoice_processing.utils import _get_return_validity_settings
 from posawesome.posawesome.api.utils import log_perf_event
 
+
 @frappe.whitelist()
 def search_invoices_for_return(
     invoice_name,

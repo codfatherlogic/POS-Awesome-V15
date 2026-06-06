@@ -24,8 +24,9 @@ from posawesome.posawesome.doctype.pos_closing_shift.closing_processing.invoices
     delete_draft_invoices,
     _set_closing_entry_invoices,
     _clear_closing_entry_invoices,
-    consolidate_closing_shift_invoices
+    consolidate_closing_shift_invoices,
 )
+
 
 class POSClosingShift(Document):
     def validate(self):

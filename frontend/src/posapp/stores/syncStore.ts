@@ -1,9 +1,30 @@
+/**
+ * Lightweight Pinia store for the legacy offline invoice sync queue.
+ *
+ * This store wraps the offline invoice queue helpers (`syncOfflineInvoices`,
+ * `getPendingOfflineInvoiceCount`) and exposes a reactive `pendingInvoicesCount`
+ * for status-bar badges. It does **not** drive the full `SyncCoordinator` —
+ * the coordinator manages background resource sync independently.
+ *
+ * **`syncPendingInvoices()`**
+ * Reads the pending count, shows a warning toast if any are queued, and then
+ * calls `syncOfflineInvoices()`. The sync is skipped entirely when `isOffline()`
+ * returns true. On completion it shows success/draft toasts and refreshes the
+ * count. Errors are caught and logged; the count is always updated in `finally`.
+ *
+ * **Options API style**
+ * This store uses the Options API form of `defineStore` (with `state` /
+ * `actions`) rather than the Setup API used by newer stores in this codebase.
+ */
 import { defineStore } from "pinia";
 import {
+	getInvoiceOutboxMode,
+	getPendingInvoiceOutboxCount,
 	getPendingOfflineInvoiceCount,
 	syncOfflineInvoices,
 	isOffline,
 } from "../../offline/index";
+import { useSyncCoordinator } from "../../offline/sync/useSyncCoordinator";
 import { useToastStore } from "./toastStore.js";
 
 export const useSyncStore = defineStore("sync", {
@@ -13,8 +34,12 @@ export const useSyncStore = defineStore("sync", {
 	actions: {
 		async updatePendingCount() {
 			try {
-				const count = await getPendingOfflineInvoiceCount();
-				this.pendingInvoicesCount = count;
+				const legacyCount = await getPendingOfflineInvoiceCount();
+				const outboxCount =
+					getInvoiceOutboxMode() === "off"
+						? legacyCount
+						: await getPendingInvoiceOutboxCount();
+				this.pendingInvoicesCount = outboxCount;
 			} catch (error) {
 				console.error("Failed to update pending invoices count", error);
 			}
@@ -39,7 +64,17 @@ export const useSyncStore = defineStore("sync", {
 			}
 
 			try {
-				const result = await syncOfflineInvoices();
+				const result =
+					getInvoiceOutboxMode() === "coordinator"
+						? await useSyncCoordinator()
+								.runTrigger("user_action")
+								.then(async () => ({
+									pending:
+										await getPendingInvoiceOutboxCount(),
+									synced: 0,
+									drafted: 0,
+								}))
+						: await syncOfflineInvoices();
 				if (result && (result.synced || result.drafted)) {
 					if (result.synced) {
 						toastStore.show({

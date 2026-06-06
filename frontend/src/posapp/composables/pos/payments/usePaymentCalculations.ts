@@ -11,6 +11,7 @@ export interface PaymentCalculationOptions {
 	redeemedCustomerCredit: Ref<number>;
 	customerCreditDict: Ref<any[]>;
 	customerInfo: Ref<any>;
+	giftCardRedemptions?: Ref<any[]>;
 	formatCurrency: (_value: number, _currency: string) => string;
 }
 
@@ -27,6 +28,7 @@ export function usePaymentCalculations(options: PaymentCalculationOptions) {
 		redeemedCustomerCredit,
 		customerCreditDict,
 		customerInfo,
+		giftCardRedemptions,
 		formatCurrency,
 	} = options;
 
@@ -89,6 +91,15 @@ export function usePaymentCalculations(options: PaymentCalculationOptions) {
 			}
 		}
 
+		const giftCardRows = giftCardRedemptions ? unref(giftCardRedemptions) : [];
+		const giftCardTotal = Array.isArray(giftCardRows)
+			? giftCardRows.reduce(
+					(sum, row) => sum + flt(row?.amount || 0),
+					0,
+				)
+			: 0;
+		total += giftCardTotal;
+
 		return flt(total);
 	});
 
@@ -129,7 +140,8 @@ export function usePaymentCalculations(options: PaymentCalculationOptions) {
 		}
 
 		let diff = flt(invoice_total - total_payments.value);
-		if (doc.is_return) return diff >= 0 ? diff : 0;
+		// For returns: negative diff means more refund needed, positive means over-refunded (cap to 0)
+		if (doc.is_return) return diff > 0 ? 0 : diff;
 		return diff;
 	});
 
@@ -183,6 +195,11 @@ export function usePaymentCalculations(options: PaymentCalculationOptions) {
 	const diff_label = computed(() => {
 		const doc = unref(invoiceDoc);
 		const currency = doc ? doc.currency : "";
+		if (doc?.is_return) {
+			return diff_payment.value < 0
+				? `Remaining Refund (${currency})`
+				: `Change (${currency})`;
+		}
 		return diff_payment.value > 0
 			? `To Be Paid (${currency})`
 			: `Change (${currency})`;

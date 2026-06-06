@@ -3,6 +3,7 @@ import { useToastStore } from "../../../stores/toastStore.js";
 import {
 	parseBooleanSetting,
 	formatStockShortageError,
+	formatNegativeStockWarning,
 } from "../../../utils/stock.js";
 
 declare const __: (_text: string, _args?: any[]) => string;
@@ -106,6 +107,24 @@ export function useCartValidation() {
 						});
 						return false;
 					}
+
+					if (
+						_showNegativeStockWarning &&
+						stockValidationResult.warning
+					) {
+						toastStore.show({
+							title: formatNegativeStockWarning(
+								stockValidationResult.warning?.item_name ||
+									item.item_name ||
+									item.item_code,
+								stockValidationResult.warning
+									?.available_qty ?? item.actual_qty,
+								stockValidationResult.warning
+									?.requested_qty ?? requestedQty,
+							),
+							color: "warning",
+						});
+					}
 				}
 			}
 			return true;
@@ -140,6 +159,9 @@ export function useCartValidation() {
 				qty: Math.abs(requestedQty),
 				stock_qty: Math.abs(requestedQty),
 				actual_qty: item.actual_qty,
+				is_stock_item: item.is_stock_item,
+				allow_negative_stock: item.allow_negative_stock,
+				conversion_factor: item.conversion_factor || 1,
 				uom: item.stock_uom || item.uom || "Nos",
 			};
 
@@ -151,8 +173,18 @@ export function useCartValidation() {
 				},
 			});
 
-			if (response.message && response.message.length > 0) {
-				const stockIssue = response.message[0];
+			const payload = response?.message;
+			const blockingIssues = Array.isArray(payload)
+				? payload
+				: Array.isArray(payload?.errors)
+					? payload.errors
+					: [];
+			const warningIssues = Array.isArray(payload?.warnings)
+				? payload.warnings
+				: [];
+
+			if (blockingIssues.length > 0) {
+				const stockIssue = blockingIssues[0];
 				return {
 					isValid: false,
 					message: `${stockIssue.item_code}: Insufficient stock. Available: ${stockIssue.available_qty}, Requested: ${stockIssue.requested_qty}`,
@@ -162,8 +194,11 @@ export function useCartValidation() {
 
 			return {
 				isValid: true,
-				message: "Stock validation passed",
+				message: warningIssues.length
+					? "Stock validation passed with warning"
+					: "Stock validation passed",
 				data: null,
+				warning: warningIssues[0] || null,
 			};
 		} catch (error) {
 			console.error("Server stock validation failed:", error);

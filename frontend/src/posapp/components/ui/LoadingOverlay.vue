@@ -9,6 +9,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { ref } from "vue";
 import { useLoading } from "../../composables/core/useLoading";
 
 defineOptions({
@@ -24,8 +25,19 @@ const props = withDefaults(defineProps<Props>(), {
 	message: "",
 });
 
-const { overlayVisible } = useLoading();
-const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const loadingApi = (() => {
+	try {
+		return typeof useLoading === "function" ? useLoading() : null;
+	} catch (error) {
+		console.warn("Falling back to inert loading overlay state", error);
+		return null;
+	}
+})();
+const overlayVisible = loadingApi?.overlayVisible || ref(false);
+const prefersReduced =
+	typeof window !== "undefined" &&
+	typeof window.matchMedia === "function" &&
+	window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const isVisible = computed(() => (props.visible !== undefined ? props.visible : overlayVisible.value));
 </script>
 

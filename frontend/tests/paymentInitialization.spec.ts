@@ -98,4 +98,37 @@ describe("paymentInitialization", () => {
 		expect(doc.payments[0].base_amount).toBe(1800);
 		expect(doc.payments[1].amount).toBe(0);
 	});
+
+	it("reduces the preferred payment amount when a gift card is redeemed", () => {
+		const doc: any = {
+			rounded_total: 300,
+			conversion_rate: 1,
+			payments: [
+				{
+					mode_of_payment: "Cash",
+					type: "Cash",
+					amount: 300,
+					base_amount: 300,
+					default: 1,
+				},
+				{
+					mode_of_payment: "Card",
+					type: "Bank",
+					amount: 0,
+					base_amount: 0,
+				},
+			],
+		};
+
+		const payment = paymentInitialization.rebalancePreferredPaymentLine?.(doc, {
+			precision: 2,
+			isCashLikePayment,
+			giftCardAmount: 120,
+		});
+
+	expect(payment).toBe(doc.payments[0]);
+	expect(doc.payments[0].amount).toBe(180);
+	expect(doc.payments[0].base_amount).toBe(180);
+	expect(doc.payments[1].amount).toBe(0);
+	});
 });

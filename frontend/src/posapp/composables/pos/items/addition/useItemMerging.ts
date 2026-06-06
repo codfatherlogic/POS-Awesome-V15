@@ -15,6 +15,22 @@ export function useItemMerging() {
 		return `${entry?.item_code || ""}::${entry?.uom || ""}::${batchPart}`;
 	};
 
+	const getStoreOrder = (context: MergeContext) => {
+		const order = context?.invoiceStore?.itemOrder;
+		return Array.isArray(order?.value)
+			? order.value
+			: Array.isArray(order)
+				? order
+				: null;
+	};
+
+	const getStoreItem = (context: MergeContext, rowId: string) => {
+		const data = context?.invoiceStore?.itemsData;
+		if (!data) return null;
+		if (typeof data.get === "function") return data.get(rowId) || null;
+		return data[rowId] || null;
+	};
+
 	const ensureMergeCache = (context: MergeContext) => {
 		if (!context) {
 			return {
@@ -22,6 +38,7 @@ export function useItemMerging() {
 				strictBatch: new Map(),
 				signature: -1,
 				lastItems: null,
+				lastOrder: null,
 			};
 		}
 		if (!context._mergeIndexCache) {
@@ -30,16 +47,26 @@ export function useItemMerging() {
 				strictBatch: new Map(),
 				signature: -1,
 				lastItems: null,
+				lastOrder: null,
 			};
 		}
 		const cache = context._mergeIndexCache;
-		const itemsRef = context.items || [];
+		const orderRef = getStoreOrder(context);
+		const itemsRef = orderRef || context.items || [];
 		const signature = itemsRef.length;
 		// PERF: micro-bench (500 merges) improved from ~6ms to ~1ms by reusing this lookup instead of Array.find
-		if (cache.signature !== signature || cache.lastItems !== itemsRef) {
+		if (
+			cache.signature !== signature ||
+			cache.lastItems !== itemsRef ||
+			cache.lastOrder !== orderRef
+		) {
 			cache.flexBatch.clear();
 			cache.strictBatch.clear();
-			itemsRef.forEach((entry, index) => {
+			itemsRef.forEach((entryOrRowId, index) => {
+				const entry =
+					orderRef && typeof entryOrRowId === "string"
+						? getStoreItem(context, entryOrRowId)
+						: entryOrRowId;
 				if (!shouldIndexItem(entry)) return;
 
 				const flexKey = buildMergeKey(entry, false);
@@ -54,6 +81,7 @@ export function useItemMerging() {
 			});
 			cache.signature = signature;
 			cache.lastItems = itemsRef;
+			cache.lastOrder = orderRef;
 		}
 		return cache;
 	};
@@ -80,15 +108,19 @@ export function useItemMerging() {
 	) => {
 		if (!context || !entry) return;
 		const cache = ensureMergeCache(context);
-		const itemsRef = context.items || [];
+		const orderRef = getStoreOrder(context);
+		const itemsRef = orderRef || context.items || [];
 		const index =
 			typeof indexHint === "number" && indexHint >= 0
 				? indexHint
-				: itemsRef.indexOf(entry);
+				: orderRef
+					? orderRef.indexOf(entry.posa_row_id)
+					: itemsRef.indexOf(entry);
 
 		if (index === -1) {
 			cache.signature = -1;
 			cache.lastItems = null;
+			cache.lastOrder = null;
 			return;
 		}
 
@@ -108,12 +140,14 @@ export function useItemMerging() {
 
 		cache.signature = itemsRef.length;
 		cache.lastItems = itemsRef;
+		cache.lastOrder = orderRef;
 	};
 
 	const invalidateMergeCache = (context: MergeContext) => {
 		if (context && context._mergeIndexCache) {
 			context._mergeIndexCache.signature = -1;
 			context._mergeIndexCache.lastItems = null;
+			context._mergeIndexCache.lastOrder = null;
 		}
 	};
 
@@ -129,6 +163,19 @@ export function useItemMerging() {
 			// Since target is the object, we need its ID.
 			// currentIndex might be passed, but we should verify.
 			const rowId = target.posa_row_id;
+			const order = getStoreOrder(context) || [];
+			const resolvedIndex =
+				typeof currentIndex === "number" && currentIndex >= 0
+					? currentIndex
+					: order.indexOf(rowId);
+			if (resolvedIndex <= 0) {
+				refreshMergeCacheEntry(
+					context,
+					target,
+					resolvedIndex === 0 ? 0 : null,
+				);
+				return;
+			}
 			// Optimised store method would be better, but composing actions works:
 			context.invoiceStore.removeItemByRowId(rowId);
 			context.invoiceStore.addItem(target, 0); // Insert at 0
@@ -153,6 +200,7 @@ export function useItemMerging() {
 		newItem: MergeEntry,
 		context: MergeContext,
 	) {
+		const qtyToAdd = Number(newItem.qty) || 1;
 		// Find a matching item (by item_code, uom, and rate)
 		const match = items.find(
 			(item) =>
@@ -162,8 +210,19 @@ export function useItemMerging() {
 		);
 		if (match) {
 			// If found, increment quantity
-			match.qty += newItem.qty || 1;
-			match.amount = match.qty * match.rate;
+			const rowId = match.posa_row_id;
+			if (
+				context?.invoiceStore?.updateItemWithTotals &&
+				rowId
+			) {
+				context.invoiceStore.updateItemWithTotals(rowId, (line) => {
+					line.qty = Number(line.qty || 0) + qtyToAdd;
+					line.amount = line.qty * Number(line.rate || 0);
+				});
+			} else {
+				match.qty = Number(match.qty || 0) + qtyToAdd;
+				match.amount = match.qty * Number(match.rate || 0);
+			}
 		} else {
 			if (context && context.invoiceStore) {
 				context.invoiceStore.addItem(newItem);

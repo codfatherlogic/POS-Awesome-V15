@@ -10,6 +10,7 @@ import { useItemMerging } from "./addition/useItemMerging";
 import { useItemCreation } from "./addition/useItemCreation";
 import { useItemBatchSerial } from "./addition/useItemBatchSerial";
 import { useItemBundles } from "./addition/useItemBundles";
+import { collectUsedSerialsForItem } from "./addition/serialSelection";
 import { useBatchSerial } from "../shared/useBatchSerial";
 
 declare const __: (_text: string, _args?: any[]) => string;
@@ -39,8 +40,15 @@ export function useItemAddition() {
 	const { expandBundle } = useItemBundles() as any;
 	const sharedBatchSerial = useBatchSerial();
 	const logBatchFlow = (message: string, payload?: any) => {
-		console.debug(`[POS BatchFlow] ${message}`, payload || {});
+		if ((globalThis as any).__POSAWESOME_DEBUG_BATCH_FLOW__ === true) {
+			console.debug(`[POS BatchFlow] ${message}`, payload || {});
+		}
 	};
+	const toFiniteNumber = (value: any, fallback = 0) => {
+		const numeric = Number(value);
+		return Number.isFinite(numeric) ? numeric : fallback;
+	};
+	const qtyOrOne = (value: any) => toFiniteNumber(value, 0) || 1;
 
 	const callSetBatchQty = (
 		context: any,
@@ -67,6 +75,33 @@ export function useItemAddition() {
 		return sharedBatchSerial.setSerialNo(item, context);
 	};
 
+	const updateLineAmounts = (line: any, context: any) => {
+		if (!line) return;
+		const toNumber = (value: any) => {
+			const parsed = Number.parseFloat(String(value ?? 0));
+			return Number.isFinite(parsed) ? parsed : 0;
+		};
+		const round =
+			typeof context?.flt === "function"
+				? context.flt
+				: (value: any) => toNumber(value);
+		const precision = Number.isFinite(Number(context?.currency_precision))
+			? Number(context.currency_precision)
+			: undefined;
+		const qty = toNumber(line.qty);
+		const rate = toNumber(line.rate);
+		const baseRate = toNumber(line.base_rate ?? line.rate);
+		line.amount = round(qty * rate, precision);
+		line.base_amount = round(qty * baseRate, precision);
+	};
+
+	const canMergeWithTarget = (context: any, target: any) => {
+		if (!target) return false;
+		const qty = Number.parseFloat(String(target.qty ?? 0));
+		if (!Number.isFinite(qty) || qty === 0) return false;
+		return context?.isReturnInvoice ? qty < 0 : qty > 0;
+	};
+
 	const getBatchAvailabilityForItem = (context: any, item: any) => {
 		if (typeof context?.getBatchAvailability === "function") {
 			return context.getBatchAvailability(item, context);
@@ -81,37 +116,6 @@ export function useItemAddition() {
 		const parsedQty = Number(item?.qty);
 		const absQty = Number.isFinite(parsedQty) ? Math.abs(Math.trunc(parsedQty)) : 0;
 		return Math.max(absQty, 1);
-	};
-
-	const collectUsedSerials = (item: any, context: any) => {
-		const used = new Set<string>();
-		const lines = Array.isArray(context?.items) ? context.items : [];
-
-		lines.forEach((line: any) => {
-			if (!line || line.posa_row_id === item?.posa_row_id) return;
-			if (line.item_code !== item?.item_code) return;
-			if (item?.has_batch_no && item?.batch_no && line.batch_no && line.batch_no !== item.batch_no) {
-				return;
-			}
-
-			if (Array.isArray(line.serial_no_selected)) {
-				line.serial_no_selected.forEach((serial: any) => {
-					const normalized = String(serial || "").trim();
-					if (normalized) used.add(normalized);
-				});
-				return;
-			}
-
-			if (line.serial_no) {
-				String(line.serial_no)
-					.split("\n")
-					.map((serial) => String(serial || "").trim())
-					.filter(Boolean)
-					.forEach((serial) => used.add(serial));
-			}
-		});
-
-		return used;
 	};
 
 	const autoAssignSerials = (item: any, context: any) => {
@@ -140,7 +144,7 @@ export function useItemAddition() {
 			return;
 		}
 
-		const usedSerials = collectUsedSerials(item, context);
+		const usedSerials = collectUsedSerialsForItem(item, context);
 		item.serial_no_selected.forEach((serial: any) => {
 			const normalized = String(serial || "").trim();
 			if (normalized) usedSerials.add(normalized);
@@ -227,32 +231,45 @@ export function useItemAddition() {
 
 		// 1. Process Updates
 		for (const [rowId, data] of currentUpdates) {
-			const item = context.invoiceStore.itemsData.get(rowId);
-			if (item) {
-				console.log("[useItemAddition] Merging item qty", {
-					item_code: item.item_code,
-					old_qty: item.qty,
-					added: data.qty,
-				});
-				item.qty += data.qty;
-				calcStockQty(item, item.qty);
+			const applyPendingUpdate = (line: any) => {
+				line.qty = toFiniteNumber(line.qty) + toFiniteNumber(data.qty);
+				calcStockQty(line, line.qty);
 
 				// Handle other updates that happen on merge
-				if (item.has_batch_no && item.batch_no) {
-					callSetBatchQty(context, item, item.batch_no, false);
+				if (line.has_batch_no && line.batch_no) {
+					callSetBatchQty(context, line, line.batch_no, false);
 				}
-				callSetSerialNo(context, item);
+				callSetSerialNo(context, line);
+				updateLineAmounts(line, context);
+			};
+			let item = context.invoiceStore.updateItemWithTotals
+				? context.invoiceStore.updateItemWithTotals(
+					rowId,
+					applyPendingUpdate,
+				)
+				: null;
 
-				// Resolve all promises waiting for this update
-				data.resolvers.forEach((r) => r(item));
+			if (!item) {
+				item =
+					context.items?.find?.(
+						(line: any) => line?.posa_row_id === rowId,
+					) ||
+					context.invoiceStore?.itemsData?.get?.(rowId) ||
+					null;
+				if (item) {
+					applyPendingUpdate(item);
+				}
 			}
+
+			// Resolve all promises waiting for this update, even if the row disappeared.
+			data.resolvers.forEach((r) => r(item));
+		}
+		if (currentUpdates.size && context.invoiceStore?.recalculateTotals) {
+			context.invoiceStore.recalculateTotals();
 		}
 
 		// 2. Process Additions
 		if (currentItems.length) {
-			console.log("[useItemAddition] Adding new items to store", {
-				count: currentItems.length,
-			});
 			const addedItems = context.invoiceStore.addItems(currentItems, 0); // Prepend to top
 
 			addedItems.forEach((item, index) => {
@@ -383,13 +400,16 @@ export function useItemAddition() {
 				!allowNegativeStock
 			) {
 				const existingItem =
-					findMergeTarget(context, item, false)?.item ||
-					context.items.find(
-						(i) =>
-							i.item_code === item.item_code &&
-							i.uom === item.uom,
-					);
-				const currentQty = existingItem ? existingItem.qty : 0;
+					findMergeTarget(context, item, false)?.item || null;
+				const compatibleExistingItem = canMergeWithTarget(
+					context,
+					existingItem,
+				)
+					? existingItem
+					: null;
+				const currentQty = compatibleExistingItem
+					? compatibleExistingItem.qty
+					: 0;
 				const requestedQty = item.qty || 1;
 				const maxQty =
 					item._base_actual_qty / (item.conversion_factor || 1);
@@ -412,6 +432,9 @@ export function useItemAddition() {
 			if (!context.new_line) {
 				// For normal additions (not returns), only merge with existing positive quantity lines
 				mergeTarget = findMergeTarget(context, item, requireBatchMatch);
+				if (!canMergeWithTarget(context, mergeTarget?.item)) {
+					mergeTarget = null;
+				}
 				index = mergeTarget ? mergeTarget.index : -1;
 			}
 
@@ -583,6 +606,9 @@ export function useItemAddition() {
 						mergeProbeItem,
 						requireBatchMatch,
 					);
+					if (!canMergeWithTarget(context, mergeTarget?.item)) {
+						mergeTarget = null;
+					}
 					index = mergeTarget ? mergeTarget.index : -1;
 					logBatchFlow("Re-check merge target", {
 						item_code: mergeProbeItem?.item_code,
@@ -609,9 +635,13 @@ export function useItemAddition() {
 								if (pendingIndex !== -1 && !context.new_line) {
 									const pendingItem = pendingItems[pendingIndex];
 									if (context.isReturnInvoice) {
-										pendingItem.qty -= Math.abs(line.qty || 1);
+										pendingItem.qty =
+											toFiniteNumber(pendingItem.qty) -
+											Math.abs(qtyOrOne(line.qty));
 									} else {
-										pendingItem.qty += line.qty || 1;
+										pendingItem.qty =
+											toFiniteNumber(pendingItem.qty) +
+											qtyOrOne(line.qty);
 									}
 									if (lineIndex === 0) {
 										const existingResolvers =
@@ -645,10 +675,6 @@ export function useItemAddition() {
 
 						// Handle extra items from batch splitting
 						if (extra_items && extra_items.length > 0) {
-							console.log(
-								"[useItemAddition] Adding split batch items",
-								extra_items.length,
-							);
 							extra_items.forEach((split_item) => {
 								context.items.unshift(split_item);
 								// Replicate basic setup for split items
@@ -684,8 +710,8 @@ export function useItemAddition() {
 					// Existing item update
 					const cur_item = context.items[index];
 					const qtyDelta = context.isReturnInvoice
-						? -Math.abs(new_item.qty || 1)
-						: new_item.qty || 1;
+						? -Math.abs(qtyOrOne(new_item.qty))
+						: qtyOrOne(new_item.qty);
 
 					if (context.invoiceStore) {
 						// Use batching for updates
@@ -694,7 +720,7 @@ export function useItemAddition() {
 							if (pendingUpdates.has(rowId)) {
 								const data = pendingUpdates.get(rowId);
 								if (!data) return;
-								data.qty += qtyDelta;
+								data.qty = toFiniteNumber(data.qty) + qtyDelta;
 								data.resolvers.push(resolve);
 							} else {
 								pendingUpdates.set(rowId, {
@@ -737,9 +763,13 @@ export function useItemAddition() {
 									if (pendingIndex !== -1 && !context.new_line) {
 										const pendingItem = pendingItems[pendingIndex];
 										if (context.isReturnInvoice) {
-											pendingItem.qty -= Math.abs(splitLine.qty || 1);
+											pendingItem.qty =
+												toFiniteNumber(pendingItem.qty) -
+												Math.abs(qtyOrOne(splitLine.qty));
 										} else {
-											pendingItem.qty += splitLine.qty || 1;
+											pendingItem.qty =
+												toFiniteNumber(pendingItem.qty) +
+												qtyOrOne(splitLine.qty);
 										}
 									} else {
 										pendingItems.push(splitLine);
@@ -775,7 +805,7 @@ export function useItemAddition() {
 							}
 						});
 					}
-					cur_item.qty += qtyDelta;
+					cur_item.qty = toFiniteNumber(cur_item.qty) + qtyDelta;
 
 					calcStockQty(cur_item, cur_item.qty);
 
@@ -793,6 +823,7 @@ export function useItemAddition() {
 
 					callSetSerialNo(context, cur_item);
 					if (cur_item.has_serial_no) autoAssignSerials(cur_item, context);
+					updateLineAmounts(cur_item, context);
 
 					if (
 						context.calc_uom &&
@@ -822,7 +853,7 @@ export function useItemAddition() {
 					}
 				}
 			} else {
-				const cur_item = context.items[index];
+				let cur_item = context.items[index];
 				const previousQty = cur_item.qty;
 				if (context.update_items_details) {
 					cur_item._needs_update = true;
@@ -851,24 +882,42 @@ export function useItemAddition() {
 					item.to_set_serial_no = null;
 				}
 
-				// For returns, subtract from quantity to make it more negative
-				if (context.isReturnInvoice) {
-					cur_item.qty -= Math.abs(item.qty || 1);
-				} else {
-					cur_item.qty += item.qty || 1;
-				}
-				calcStockQty(cur_item, cur_item.qty);
+				const mergeIntoLine = (line: any) => {
+					// For returns, subtract from quantity to make it more negative
+					if (context.isReturnInvoice) {
+						line.qty =
+							toFiniteNumber(line.qty) -
+							Math.abs(qtyOrOne(item.qty));
+					} else {
+						line.qty = toFiniteNumber(line.qty) + qtyOrOne(item.qty);
+					}
+					calcStockQty(line, line.qty);
 
-				// Update batch quantity if needed
+					// Update batch quantity if needed
+					if (
+						line.has_batch_no &&
+						line.batch_no
+					) {
+						callSetBatchQty(context, line, line.batch_no, false);
+					}
+
+					callSetSerialNo(context, line);
+					if (line.has_serial_no) autoAssignSerials(line, context);
+					updateLineAmounts(line, context);
+				};
+
 				if (
-					cur_item.has_batch_no &&
-					cur_item.batch_no
+					context.invoiceStore?.updateItemWithTotals &&
+					cur_item?.posa_row_id
 				) {
-					callSetBatchQty(context, cur_item, cur_item.batch_no, false);
+					const updatedItem = context.invoiceStore.updateItemWithTotals(
+						cur_item.posa_row_id,
+						mergeIntoLine,
+					);
+					if (updatedItem) cur_item = updatedItem;
+				} else {
+					mergeIntoLine(cur_item);
 				}
-
-				callSetSerialNo(context, cur_item);
-				if (cur_item.has_serial_no) autoAssignSerials(cur_item, context);
 
 				// Recalculate rates if UOM differs from stock UOM
 				if (

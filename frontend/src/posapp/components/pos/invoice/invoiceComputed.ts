@@ -33,10 +33,27 @@ interface InvoiceComputedVm {
 const resolveMetric = (metric?: StoreMetric): number | undefined =>
 	typeof metric === "number" ? metric : metric?.value;
 
+const resolveFlt = (context: InvoiceComputedVm) => {
+	if (typeof context.flt === "function") {
+		return context.flt.bind(context);
+	}
+
+	return (value: unknown, precision?: number) => {
+		const numeric = Number(value);
+		if (!Number.isFinite(numeric)) {
+			return 0;
+		}
+		return typeof precision === "number"
+			? Number(numeric.toFixed(precision))
+			: numeric;
+	};
+};
+
 const invoiceComputed: Record<string, unknown> & ThisType<InvoiceComputedVm> = {
 	// Calculate total quantity of all items
 	total_qty() {
 		const mark = perfMarkStart("pos:totals-total_qty");
+		const flt = resolveFlt(this);
 		const store = this.invoiceStore;
 		const storeValue = resolveMetric(store?.totalQty);
 		let qty;
@@ -50,13 +67,14 @@ const invoiceComputed: Record<string, unknown> & ThisType<InvoiceComputedVm> = {
 			});
 		}
 
-		const result = this.flt(qty, this.float_precision);
+		const result = flt(qty, this.float_precision);
 		perfMarkEnd("pos:totals-total_qty", mark);
 		return result;
 	},
 	// Calculate total amount for all items (handles returns)
 	Total() {
 		const mark = perfMarkStart("pos:totals-gross");
+		const flt = resolveFlt(this);
 		const store = this.invoiceStore;
 		const storeValue = resolveMetric(store?.grossTotal);
 		let sum;
@@ -75,13 +93,14 @@ const invoiceComputed: Record<string, unknown> & ThisType<InvoiceComputedVm> = {
 			});
 		}
 
-		const result = this.flt(sum, this.currency_precision);
+		const result = flt(sum, this.currency_precision);
 		perfMarkEnd("pos:totals-gross", mark);
 		return result;
 	},
 	// Calculate subtotal after discounts and delivery charges
 	subtotal() {
 		const mark = perfMarkStart("pos:totals-subtotal");
+		const flt = resolveFlt(this);
 		const store = this.invoiceStore;
 		const storeValue = resolveMetric(store?.grossTotal);
 		let sum =
@@ -103,20 +122,21 @@ const invoiceComputed: Record<string, unknown> & ThisType<InvoiceComputedVm> = {
 		}
 
 		// Always reduce total by discount magnitude.
-		const additional_discount = Math.abs(this.flt(this.additional_discount));
+		const additional_discount = Math.abs(flt(this.additional_discount));
 		sum -= additional_discount;
 
 		// Add delivery charges
-		const delivery_charges = this.flt(this.delivery_charges_rate);
+		const delivery_charges = flt(this.delivery_charges_rate);
 		sum += delivery_charges;
 
-		const result = this.flt(sum, this.currency_precision);
+		const result = flt(sum, this.currency_precision);
 		perfMarkEnd("pos:totals-subtotal", mark);
 		return result;
 	},
 	// Calculate total discount amount for all items
 	total_items_discount_amount() {
 		const mark = perfMarkStart("pos:totals-discount");
+		const flt = resolveFlt(this);
 		const store = this.invoiceStore;
 		const storeValue = resolveMetric(store?.discountTotal);
 		let sum;
@@ -132,7 +152,7 @@ const invoiceComputed: Record<string, unknown> & ThisType<InvoiceComputedVm> = {
 			});
 		}
 
-		const result = this.flt(sum, this.float_precision);
+		const result = flt(sum, this.float_precision);
 		perfMarkEnd("pos:totals-discount", mark);
 		return result;
 	},

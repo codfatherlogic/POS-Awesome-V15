@@ -5,6 +5,7 @@ from erpnext.stock.doctype.batch.batch import get_batch_qty
 from posawesome.posawesome.api.items import get_bulk_stock_availability, get_stock_availability
 from posawesome.posawesome.api.invoice_processing.utils import _sanitize_item_name
 
+
 def _is_stock_item(item):
     """Return True when the provided row represents a stock item."""
 
@@ -53,10 +54,42 @@ def _get_available_stock(item):
     return get_stock_availability(item_code, warehouse)
 
 
-def _collect_stock_errors(items):
-    """Return list of items exceeding available stock."""
+def _profile_blocks_sale(pos_profile):
+    block_sale = 1
+    if pos_profile:
+        block_sale_value = frappe.db.get_value(
+            "POS Profile",
+            pos_profile,
+            "posa_block_sale_beyond_available_qty",
+        )
+        if block_sale_value not in (None, ""):
+            block_sale = block_sale_value
+
+    return bool(cint(block_sale))
+
+
+def _stock_policy_for_item(item, pos_profile=None, global_allow_negative=None):
+    if _profile_blocks_sale(pos_profile):
+        return "block"
+
+    if _allow_negative_stock(item, global_allow_negative=global_allow_negative):
+        return "warn"
+
+    return "block"
+
+
+def _requested_stock_qty(item):
+    requested = flt(item.get("stock_qty"))
+    if requested:
+        return requested
+
+    return flt(item.get("qty")) * flt(item.get("conversion_factor") or 1)
+
+
+def _collect_stock_errors(items, pos_profile=None, include_warnings=False):
+    """Return stock shortages, aggregated by item/warehouse/batch."""
     errors = []
-    items_to_check = []
+    grouped_items = {}
 
     global_allow_negative = cint(frappe.db.get_single_value("Stock Settings", "allow_negative_stock") or 0)
 
@@ -65,13 +98,46 @@ def _collect_stock_errors(items):
             continue
         if not _is_stock_item(d):
             continue
-        if _allow_negative_stock(d, global_allow_negative=global_allow_negative):
-            continue
-        items_to_check.append(d)
 
-    if not items_to_check:
+        policy = _stock_policy_for_item(
+            d,
+            pos_profile=pos_profile,
+            global_allow_negative=global_allow_negative,
+        )
+        if policy != "block" and not include_warnings:
+            continue
+
+        item_code = d.get("item_code")
+        warehouse = d.get("warehouse")
+        batch_no = cstr(d.get("batch_no"))
+        requested = abs(flt(_requested_stock_qty(d)))
+        if not requested:
+            continue
+
+        key = (item_code, warehouse, batch_no, policy)
+        if key not in grouped_items:
+            grouped_items[key] = frappe._dict(
+                {
+                    "item_code": item_code,
+                    "item_name": d.get("item_name") or item_code,
+                    "warehouse": warehouse,
+                    "batch_no": batch_no,
+                    "requested_qty": 0,
+                    "policy": policy,
+                    "stock_qty": 0,
+                    "qty": 0,
+                    "conversion_factor": 1,
+                }
+            )
+
+        grouped_items[key].requested_qty += requested
+        grouped_items[key].stock_qty = grouped_items[key].requested_qty
+        grouped_items[key].qty = grouped_items[key].requested_qty
+
+    if not grouped_items:
         return []
 
+    items_to_check = list(grouped_items.values())
     stock_map = get_bulk_stock_availability(items_to_check)
 
     for d in items_to_check:
@@ -80,43 +146,41 @@ def _collect_stock_errors(items):
         batch_no = cstr(d.get("batch_no"))
 
         available = stock_map.get((item_code, warehouse, batch_no), 0.0)
-        requested = flt(d.get("stock_qty") or (flt(d.get("qty")) * flt(d.get("conversion_factor") or 1)))
+        requested = flt(d.get("requested_qty"))
         if requested > available:
             errors.append(
                 {
                     "item_code": item_code,
+                    "item_name": d.get("item_name") or item_code,
                     "warehouse": warehouse,
+                    "batch_no": batch_no,
                     "requested_qty": requested,
                     "available_qty": available,
+                    "policy": d.get("policy"),
                 }
             )
     return errors
 
 
 def _should_block(pos_profile):
-    allow_negative = cint(frappe.db.get_single_value("Stock Settings", "allow_negative_stock") or 0)
-    if allow_negative:
-        return False
-
-    block_sale = 1
-    if pos_profile:
-        block_sale = cint(
-            frappe.db.get_value("POS Profile", pos_profile, "posa_block_sale_beyond_available_qty") or 1
-        )
-
-    return bool(block_sale)
+    return _profile_blocks_sale(pos_profile)
 
 
 def _validate_stock_on_invoice(invoice_doc):
     if invoice_doc.doctype == "Sales Invoice" and not cint(getattr(invoice_doc, "update_stock", 0)):
         frappe.logger().debug("Skipping stock validation for Sales Invoice without stock update")
         return
-    items_to_check = [d.as_dict() for d in invoice_doc.items if d.get("is_stock_item")]
+    items_to_check = [d.as_dict() for d in invoice_doc.items]
     if hasattr(invoice_doc, "packed_items"):
         items_to_check.extend([d.as_dict() for d in invoice_doc.packed_items])
-    errors = _collect_stock_errors(items_to_check)
-    if errors and _should_block(invoice_doc.pos_profile):
-        frappe.throw(frappe.as_json({"errors": errors}), frappe.ValidationError)
+    errors = _collect_stock_errors(
+        items_to_check,
+        pos_profile=invoice_doc.pos_profile,
+        include_warnings=True,
+    )
+    blocking_errors = [row for row in errors if row.get("policy") == "block"]
+    if blocking_errors:
+        frappe.throw(frappe.as_json({"errors": blocking_errors}), frappe.ValidationError)
 
 
 def _auto_set_return_batches(invoice_doc):
@@ -172,11 +236,7 @@ def _auto_set_return_batches(invoice_doc):
         fields=["name", "expiry_date"],
     )
 
-    valid_batches = {
-        b.name
-        for b in batch_details
-        if not b.expiry_date or getdate(b.expiry_date) >= today
-    }
+    valid_batches = {b.name for b in batch_details if not b.expiry_date or getdate(b.expiry_date) >= today}
 
     # Assign batches
     for item, batch_list in items_to_process:
@@ -187,7 +247,9 @@ def _auto_set_return_batches(invoice_doc):
                 assigned = True
                 break
         if not assigned and not allow_free:
-            frappe.throw(_("No valid batches available in {0} for {1}.").format(item.warehouse, item.item_code))
+            frappe.throw(
+                _("No valid batches available in {0} for {1}.").format(item.warehouse, item.item_code)
+            )
 
 
 def _apply_item_name_overrides(invoice_doc, overrides=None):

@@ -1,3 +1,4 @@
+import { refreshBootstrapSnapshotFromCacheState } from "./cache";
 import { memory, persist } from "./db";
 
 type AnyRecord = Record<string, any>;
@@ -56,8 +57,7 @@ export async function initializeStockCache(
 
 		if (missingItems.length === 0) {
 			if (!memory.stock_cache_ready) {
-				memory.stock_cache_ready = true;
-				persist("stock_cache_ready");
+				setStockCacheReady(true);
 			}
 			console.debug("Stock cache already initialized");
 			console.info(
@@ -90,9 +90,8 @@ export async function initializeStockCache(
 			});
 
 			memory.local_stock_cache = existingCache;
-			memory.stock_cache_ready = true;
 			persist("local_stock_cache");
-			persist("stock_cache_ready");
+			setStockCacheReady(true);
 			console.info(
 				"Stock cache initialized with",
 				Object.keys(existingCache).length,
@@ -114,6 +113,9 @@ export function isStockCacheReady() {
 export function setStockCacheReady(ready: boolean) {
 	memory.stock_cache_ready = ready;
 	persist("stock_cache_ready");
+	refreshBootstrapSnapshotFromCacheState({
+		stockCacheReady: memory.stock_cache_ready,
+	});
 }
 
 export function updateLocalStock(items: AnyRecord[]) {
@@ -179,6 +181,30 @@ export function updateLocalStockCache(items: AnyRecord[]) {
 export function clearLocalStockCache() {
 	memory.local_stock_cache = {};
 	persist("local_stock_cache");
+	setStockCacheReady(false);
+}
+
+export function removeLocalStockEntries(itemCodes: string[]) {
+	try {
+		const normalizedCodes = Array.from(
+			new Set(
+				(Array.isArray(itemCodes) ? itemCodes : [])
+					.map((code) => String(code || "").trim())
+					.filter(Boolean),
+			),
+		);
+		if (!normalizedCodes.length) {
+			return;
+		}
+		const stockCache = memory.local_stock_cache || {};
+		normalizedCodes.forEach((code) => {
+			delete stockCache[code];
+		});
+		memory.local_stock_cache = stockCache;
+		persist("local_stock_cache");
+	} catch (e) {
+		console.error("Failed to remove local stock entries", e);
+	}
 }
 
 export function updateLocalStockWithActualQuantities(

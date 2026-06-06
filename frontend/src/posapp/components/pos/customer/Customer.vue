@@ -59,7 +59,7 @@
 
 				<!-- Add icon (right) -->
 				<template #append-inner>
-					<span v-if="isCustomerSearchLocked" class="customer-load-percent">
+					<span v-if="showCustomerLoadProgress" class="customer-load-percent">
 						{{ customerLoadPercent }}%
 					</span>
 					<v-tooltip :text="__('Add new customer')" content-class="posa-theme-tooltip">
@@ -80,25 +80,25 @@
 				<template #item="{ props, item }">
 					<v-list-item v-bind="props">
 						<v-list-item-subtitle v-if="item.raw.customer_name !== item.raw.name">
-							<div v-html="`ID: ${item.raw.name}`"></div>
+							<div>ID: {{ item.raw.name }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.tax_id">
-							<div v-html="`TAX ID: ${item.raw.tax_id}`"></div>
+							<div>TAX ID: {{ item.raw.tax_id }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.email_id">
-							<div v-html="`Email: ${item.raw.email_id}`"></div>
+							<div>Email: {{ item.raw.email_id }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.mobile_no">
-							<div v-html="`Mobile No: ${item.raw.mobile_no}`"></div>
+							<div>Mobile No: {{ item.raw.mobile_no }}</div>
 						</v-list-item-subtitle>
 						<v-list-item-subtitle v-if="item.raw.primary_address">
-							<div v-html="`Primary Address: ${item.raw.primary_address}`"></div>
+							<div>Primary Address: {{ item.raw.primary_address }}</div>
 						</v-list-item-subtitle>
 					</v-list-item>
 				</template>
 			</v-autocomplete>
 			<v-progress-linear
-				v-if="isCustomerSearchLocked"
+				v-if="showCustomerLoadProgress"
 				:model-value="customerLoadPercent"
 				height="4"
 				color="primary"
@@ -106,7 +106,6 @@
 				rounded
 			/>
 		</div>
-
 		<!-- Update customer modal -->
 		<div class="mt-4">
 			<UpdateCustomer />
@@ -212,6 +211,7 @@ import { useCustomersStore } from "../../../stores/customersStore.js";
 import { useOnlineStatus } from "../../../composables/core/useOnlineStatus";
 import { useToastStore } from "../../../stores/toastStore.js";
 import { useUIStore } from "../../../stores/uiStore.js";
+import { ensureCustomersReady } from "../../../modules/customers/customerLoadingCoordinator";
 
 export default {
 	props: {
@@ -232,6 +232,8 @@ export default {
 			loadingCustomers,
 			isCustomerBackgroundLoading,
 			loadProgress,
+			customersLoaded,
+			loadedCustomerCount,
 			selectedCustomer,
 			customerInfo,
 		} = storeToRefs(customersStore);
@@ -247,31 +249,69 @@ export default {
 		const { isOnline: networkOnline } = useOnlineStatus();
 
 		const effectiveReadonly = computed(() => readonlyState.value && networkOnline.value);
-		const isCustomerSearchLocked = computed(
+		const showCustomerLoadProgress = computed(
 			() => loadingCustomers.value || isCustomerBackgroundLoading.value,
 		);
+		const isCustomerSearchLocked = computed(() => loadingCustomers.value && customers.value.length === 0);
 		const customerLoadPercent = computed(() =>
 			Math.max(0, Math.min(100, Math.round(loadProgress.value || 0))),
 		);
 		const customerFieldLabel = computed(() =>
-			isCustomerSearchLocked.value
+			showCustomerLoadProgress.value
 				? `${frappe._("Loading customers")} ${customerLoadPercent.value}%`
 				: frappe._("Customer"),
 		);
 		const customerFieldPlaceholder = computed(() =>
-			isCustomerSearchLocked.value
+			showCustomerLoadProgress.value
 				? `${__("Loading customers...")} ${customerLoadPercent.value}%`
 				: __("Search customer"),
 		);
 		const customerNoDataText = computed(() =>
-			isCustomerSearchLocked.value
+			showCustomerLoadProgress.value
 				? `${__("Loading customers...")} ${customerLoadPercent.value}%`
 				: __("Customers not found"),
 		);
+		const hasReadyCustomerCache = () =>
+			Boolean(
+				customersLoaded.value &&
+					(loadProgress.value >= 100 ||
+						loadedCustomerCount.value > 0 ||
+						customers.value.length > 0),
+			);
+
+		const formatCustomerMetric = (value) => {
+			const numericValue = Number(value || 0);
+			return new Intl.NumberFormat(undefined, {
+				minimumFractionDigits: 0,
+				maximumFractionDigits: 2,
+			}).format(numericValue);
+		};
 
 		const searchDebounce = _.debounce((term) => {
 			customersStore.queueSearch(term || "");
 		}, 300);
+
+		const ensureCustomersForProfile = (profile) => {
+			if (!profile) {
+				return ensureCustomersReady({
+					profile: null,
+					online: networkOnline.value,
+					manualOffline: false,
+					setProfile: customersStore.setPosProfile,
+					load: customersStore.get_customer_names,
+					isReady: hasReadyCustomerCache,
+				});
+			}
+
+			return ensureCustomersReady({
+				profile,
+				online: networkOnline.value,
+				manualOffline: false,
+				setProfile: customersStore.setPosProfile,
+				load: customersStore.get_customer_names,
+				isReady: hasReadyCustomerCache,
+			});
+		};
 
 		watch(
 			selectedCustomer,
@@ -286,9 +326,7 @@ export default {
 		watch(
 			() => props.pos_profile,
 			(profile) => {
-				if (profile) {
-					customersStore.setPosProfile(profile);
-				}
+				void ensureCustomersForProfile(profile);
 			},
 			{ immediate: true },
 		);
@@ -316,6 +354,16 @@ export default {
 			}
 		};
 
+		const commitPendingCustomerSelection = () => {
+			if (tempSelectedCustomer.value) {
+				internalCustomer.value = tempSelectedCustomer.value;
+				customersStore.setSelectedCustomer(tempSelectedCustomer.value);
+			} else if (selectedCustomer.value) {
+				internalCustomer.value = selectedCustomer.value;
+			}
+			tempSelectedCustomer.value = null;
+		};
+
 		const onCustomerMenuToggle = (isOpen) => {
 			isMenuOpen.value = isOpen;
 			if (isOpen) {
@@ -329,16 +377,11 @@ export default {
 			}
 
 			detachScrollListener();
-			if (tempSelectedCustomer.value) {
-				internalCustomer.value = tempSelectedCustomer.value;
-				customersStore.setSelectedCustomer(tempSelectedCustomer.value);
-			} else if (selectedCustomer.value) {
-				internalCustomer.value = selectedCustomer.value;
-			}
-			tempSelectedCustomer.value = null;
+			commitPendingCustomerSelection();
 		};
 
 		const closeCustomerMenu = () => {
+			commitPendingCustomerSelection();
 			const dropdown = customerDropdown.value;
 			if (dropdown) {
 				try {
@@ -482,10 +525,7 @@ export default {
 			watch(
 				() => uiStore.posProfile,
 				async (profile) => {
-					if (profile) {
-						customersStore.setPosProfile(profile);
-						await customersStore.get_customer_names();
-					}
+					await ensureCustomersForProfile(profile);
 				},
 				{ deep: true, immediate: true },
 			);
@@ -522,6 +562,7 @@ export default {
 			filteredCustomers,
 			loadingCustomers,
 			isCustomerBackgroundLoading,
+			showCustomerLoadProgress,
 			isCustomerSearchLocked,
 			customerLoadPercent,
 			customerFieldLabel,
@@ -540,6 +581,8 @@ export default {
 			focusCustomerSearch,
 			reload_customers,
 			networkOnline,
+			customerInfo,
+			formatCustomerMetric,
 		};
 	},
 };

@@ -198,11 +198,7 @@
 <script setup>
 import { ref, watch } from "vue";
 import { formatUtils } from "../format";
-import {
-	getOfflineInvoices,
-	deleteOfflineInvoice,
-	getPendingOfflineInvoiceCount,
-} from "../../offline/index";
+import { getOfflineInvoices, deleteOfflineInvoice, getPendingOfflineInvoiceCount } from "../../offline/index";
 
 defineOptions({
 	name: "OfflineInvoicesDialog",
@@ -295,11 +291,11 @@ function loadInvoices() {
 	invoices.value = getOfflineInvoices();
 }
 
-function removeInvoice(index) {
+async function removeInvoice(index) {
 	if (!props.posProfile.posa_allow_delete_offline_invoice) {
 		return;
 	}
-	deleteOfflineInvoice(index);
+	await deleteOfflineInvoice(index);
 	loadInvoices();
 	emit("deleted", getPendingOfflineInvoiceCount());
 }

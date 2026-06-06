@@ -4,6 +4,7 @@ export type PaymentLine = {
 	base_amount?: number;
 	default?: number | boolean;
 	type?: string;
+	account?: string;
 };
 
 export type PaymentInitDoc = {
@@ -19,6 +20,7 @@ export type PreferredPaymentRebalanceOptions = {
 	isCashLikePayment: (_payment: PaymentLine) => boolean;
 	loyaltyAmount?: number;
 	redeemedCustomerCredit?: number;
+	giftCardAmount?: number;
 };
 
 const toNumber = (value: unknown): number => {
@@ -150,7 +152,8 @@ export const rebalancePreferredPaymentLine = (
 	const conversionRate = toNumber(doc.conversion_rate) || 1;
 	const coveredAmount =
 		toNumber(options.loyaltyAmount) +
-		toNumber(options.redeemedCustomerCredit);
+		toNumber(options.redeemedCustomerCredit) +
+		toNumber(options.giftCardAmount);
 	const otherPaymentsTotal = payments.reduce((sum, payment) => {
 		if (payment === preferredPayment) {
 			return sum;

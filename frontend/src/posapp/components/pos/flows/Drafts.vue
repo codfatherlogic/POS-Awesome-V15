@@ -47,7 +47,9 @@
 									>
 										<div class="drafts-dialog-item__top">
 											<div class="drafts-dialog-item__identity">
-												<strong>{{ item.customer_name || __("Walk-in Customer") }}</strong>
+												<strong>{{
+													item.customer_name || __("Walk-in Customer")
+												}}</strong>
 												<span>{{ item.name }}</span>
 											</div>
 											<div class="drafts-dialog-item__amount">
@@ -78,7 +80,9 @@
 									item-value="name"
 									:class="[
 										'elevation-1 drafts-dialog-table',
-										isDarkTheme ? 'drafts-dialog-table--dark' : 'drafts-dialog-table--light',
+										isDarkTheme
+											? 'drafts-dialog-table--dark'
+											: 'drafts-dialog-table--light',
 									]"
 									:theme="isDarkTheme ? 'dark' : 'light'"
 									show-select
@@ -120,6 +124,7 @@ import { useInvoiceStore } from "../../../stores/invoiceStore";
 import { storeToRefs } from "pinia";
 import { useTheme } from "../../../composables/core/useTheme";
 import { useResponsive } from "../../../composables/core/useResponsive";
+import { fetchDraftInvoiceDoc } from "../../../utils/draftInvoices";
 
 export default {
 	// props: ["draftsDialog"],
@@ -203,19 +208,11 @@ export default {
 		async submit_dialog() {
 			if (this.selected.length > 0) {
 				const selectedDraft = this.selected[0];
-				const doctype =
-					selectedDraft?.doctype ||
-					(this.uiStore.posProfile?.create_pos_invoice_instead_of_sales_invoice
-						? "POS Invoice"
-						: "Sales Invoice");
 
 				try {
-					const { message } = await frappe.call({
-						method: "posawesome.posawesome.api.invoices.get_draft_invoice_doc",
-						args: {
-							invoice_name: selectedDraft.name,
-							doctype,
-						},
+					const message = await fetchDraftInvoiceDoc({
+						draft: selectedDraft,
+						posProfile: this.uiStore.posProfile,
 					});
 					if (message) {
 						this.invoiceStore.triggerLoadInvoice(message);
@@ -245,6 +242,12 @@ export default {
 		draftsDialog(value) {
 			if (!value) {
 				this.selected = [];
+				return;
+			}
+
+			if (!this.uiStore.invoiceManagementDialog) {
+				this.uiStore.closeDrafts();
+				this.uiStore.openInvoiceManagement("drafts", this.uiStore.draftSource || "invoice");
 			}
 		},
 		draftsData: {
@@ -372,7 +375,10 @@ export default {
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
-	transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+	transition:
+		border-color 0.2s ease,
+		box-shadow 0.2s ease,
+		transform 0.2s ease;
 }
 
 .drafts-dialog-item--selected {

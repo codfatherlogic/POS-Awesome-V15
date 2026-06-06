@@ -26,7 +26,7 @@
 			</v-col>
 		</v-row>
 		<!-- Print Format Selection -->
-		<v-row class="pb-0 mb-2" align="start">
+		<v-row v-if="showPrintFormat" class="pb-0 mb-2" align="start">
 			<v-col cols="12">
 				<v-select
 					density="compact"
@@ -69,6 +69,10 @@ defineProps({
 	printFormat: {
 		type: String,
 		default: "",
+	},
+	showPrintFormat: {
+		type: Boolean,
+		default: true,
 	},
 });
 

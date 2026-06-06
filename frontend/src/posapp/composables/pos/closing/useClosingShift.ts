@@ -95,6 +95,19 @@ export function useClosingShift(eventBus: any) {
 			}),
 		});
 
+		const normalizeLoyaltyRedemption = (loyalty: any = {}) => ({
+			count: toNumber(loyalty?.count),
+			points: toNumber(loyalty?.points),
+			company_currency_total: toNumber(loyalty?.company_currency_total),
+			by_currency: normalizeCurrencyRows(loyalty?.by_currency, {
+				includeCount: true,
+				includeExchangeRates: true,
+			}).map((row: any, index: number) => ({
+				...row,
+				points: toNumber(loyalty?.by_currency?.[index]?.points),
+			})),
+		});
+
 		const normalizeChangeReturned = (change: any = {}) => {
 			const normalizeBranch = (branch: any = {}) => ({
 				company_currency_total: toNumber(
@@ -198,6 +211,9 @@ export function useClosingShift(eventBus: any) {
 				),
 			},
 			change_returned: normalizeChangeReturned(payload.change_returned),
+			loyalty_redemption: normalizeLoyaltyRedemption(
+				payload.loyalty_redemption,
+			),
 			cash_expected: {
 				mode_of_payment: payload.cash_expected?.mode_of_payment || "",
 				company_currency_total: toNumber(
