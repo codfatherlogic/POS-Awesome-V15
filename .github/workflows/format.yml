@@ -24,7 +24,7 @@ permissions:
 jobs:
   format:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, crenya-ci]
     env:
       MODE: ${{ github.event.inputs.mode }}
       PRETTIER_GLOB: ${{ github.event.inputs.prettier_glob }}

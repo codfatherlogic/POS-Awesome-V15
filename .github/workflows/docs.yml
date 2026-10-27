@@ -12,7 +12,7 @@ on:
 jobs:
   docs-check:
     name: TypeDoc check
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
 
     steps:
       - name: Checkout
@@ -37,7 +37,7 @@ jobs:
 
   docs-generate:
     name: Generate & commit API reference
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     # Only commit generated docs from protected integration branches.
     if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
     needs: docs-check

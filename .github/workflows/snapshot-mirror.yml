@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   mirror:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, crenya-ci]
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
