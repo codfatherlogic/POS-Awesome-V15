@@ -12,7 +12,7 @@ permissions:
 jobs:
   backend:
     name: Python lint and Frappe tests
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     services:
       mariadb:
         image: mariadb:10.6

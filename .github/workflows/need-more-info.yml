@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, crenya-ci]
     steps:
       - name: Evaluate issue body
         uses: actions/github-script@v7
