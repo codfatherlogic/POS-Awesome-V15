@@ -12,7 +12,7 @@ permissions:
 jobs:
   frontend:
     name: Type-check, lint, unit, smoke
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     defaults:
       run:
         working-directory: frontend

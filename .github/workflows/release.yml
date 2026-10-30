@@ -15,7 +15,7 @@ concurrency:
 jobs:
   frontend-gates:
     name: Frontend release gates
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     defaults:
       run:
         working-directory: frontend
@@ -57,7 +57,7 @@ jobs:
 
   backend-gates:
     name: Backend release gates
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     services:
       mariadb:
         image: mariadb:10.6
@@ -129,7 +129,7 @@ jobs:
 
   build-gates:
     name: Build release gates
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

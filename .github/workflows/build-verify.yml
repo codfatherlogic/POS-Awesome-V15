@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-verify:
     name: Production build and artifact gates
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, crenya-ci]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
