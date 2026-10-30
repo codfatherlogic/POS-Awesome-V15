@@ -1,2 +1,2 @@
 # Development dependencies for code formatting
-black==25.1.0
+black==26.10.1
