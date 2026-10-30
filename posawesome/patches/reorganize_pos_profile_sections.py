@@ -80,12 +80,16 @@ ORDERED_CHAIN = [
     "posa_section_sales_returns",
     "posa_allow_credit_sale",
     "posa_allow_return",
+    "posa_allow_item_exchange",
     "posa_allow_return_without_invoice",
     "posa_allow_free_batch_return",
     "posa_enable_return_validity",
     "posa_return_validity_days",
     "use_cashback",
     "use_customer_credit",
+    "posa_use_gift_cards",
+    "posa_allow_supervisor_manage_gift_cards",
+    "posa_gift_card_liability_account",
     "posa_sales_persons",
     "posa_apply_customer_discount",
     "posa_allow_write_off_change",
@@ -113,10 +117,12 @@ ORDERED_CHAIN = [
     "posa_search_batch_no",
     "posa_search_serial_no",
     "posa_block_sale_beyond_available_qty",
+    "posa_allow_offline_sale_without_stock_verification",
     "posa_allow_line_item_name_override",
     "posa_show_custom_name_marker_on_print",
     "posa_allow_zero_rated_items",
     "posa_input_qty",
+    "posa_focus_cart_qty_after_item_add",
     "posa_new_line",
     "posa_section_print_delivery",
     "posa_use_delivery_charges",
@@ -127,6 +133,9 @@ ORDERED_CHAIN = [
     "posa_allow_print_draft_invoices",
     "posa_open_print_in_new_tab",
     "posa_silent_print",
+    "posa_qz_printer_name",
+    "posa_raw_printing",
+    "posa_raw_print_width",
     "posa_print_format_rules",
     "posa_section_cash_movement",
     "posa_enable_cash_movement",
@@ -163,6 +172,9 @@ ORDERED_CHAIN = [
     "posa_force_server_items",
     "posa_use_server_cache",
     "posa_server_cache_duration",
+    "posa_fast_counter_mode",
+    "posa_hot_catalog_limit",
+    "posa_fast_counter_positive_stock_only",
     "posa_force_reload_items",
     "posa_smart_reload_mode",
     "column_break_anyol",
@@ -222,6 +234,10 @@ def _reanchor_fields():
     for fieldname in ORDERED_CHAIN:
         cf_name = f"POS Profile-{fieldname}"
         if not frappe.db.exists("Custom Field", cf_name):
+            continue
+        if fieldname == "posa_section_print_delivery":
+            _set_insert_after(fieldname, "select_print_heading")
+            previous = fieldname
             continue
         if previous and previous != fieldname:
             _set_insert_after(fieldname, previous)

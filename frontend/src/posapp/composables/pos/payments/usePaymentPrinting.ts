@@ -6,8 +6,18 @@ import {
 	silentPrint,
 	watchPrintWindow,
 } from "../../../plugins/print";
-import { printDocumentViaQz } from "../../../services/qzTray";
+import {
+	confirmDocumentPrintFallback,
+	printDocumentViaConfiguredQz,
+	shouldUseConfiguredQzDocumentPrinting,
+	shouldUseRawDocumentPrinting,
+} from "../../../services/documentPrint";
 import { isOffline } from "../../../../offline/index";
+import { resolvePaymentPrintDoctype } from "../../../utils/paymentPrintDoctype";
+import {
+	isExchangeReceiptDocument,
+	printExchangeReceipt,
+} from "../../../services/exchangeReceiptPrint";
 
 declare const frappe: any;
 
@@ -21,6 +31,14 @@ export interface PaymentPrintingOptions {
 export function usePaymentPrinting(options: PaymentPrintingOptions) {
 	const { invoiceDoc, posProfile, invoiceType, printFormat } = options;
 
+	const resolveDocumentName = (value: any) => {
+		if (value === null || value === undefined) {
+			return "";
+		}
+		const name = String(value).trim();
+		return name && name !== "undefined" && name !== "null" ? name : "";
+	};
+
 	const resolvePrintContext = (input: { doc?: any; doctype?: string } = {}) => {
 		const doc = input.doc || unref(invoiceDoc);
 		const profile = unref(posProfile);
@@ -31,21 +49,11 @@ export function usePaymentPrinting(options: PaymentPrintingOptions) {
 			profile.print_format_for_online ||
 			profile.print_format;
 		const letter_head = profile.letter_head || 0;
-		let doctype: string;
-
-		if (input.doctype) {
-			doctype = input.doctype;
-		} else if (input.doc?.doctype) {
-			doctype = input.doc.doctype;
-		} else if (type === "Quotation") {
-			doctype = "Quotation";
-		} else if (type === "Order" && profile.posa_create_only_sales_order) {
-			doctype = "Sales Order";
-		} else if (profile.create_pos_invoice_instead_of_sales_invoice) {
-			doctype = "POS Invoice";
-		} else {
-			doctype = "Sales Invoice";
-		}
+		const doctype = resolvePaymentPrintDoctype({
+			profile,
+			invoiceType: type,
+			explicitDoctype: input.doctype || input.doc?.doctype,
+		});
 
 		return {
 			doc,
@@ -90,19 +98,31 @@ export function usePaymentPrinting(options: PaymentPrintingOptions) {
 		win.print();
 	};
 
-	const loadPrintPage = async (input: { doc?: any; doctype?: string } = {}) => {
+	const loadPrintPage = async (input: { doc?: any; doctype?: string; name?: string } = {}) => {
 		const { doc, profile, doctype, print_format, letter_head } = resolvePrintContext(input);
+		if (isExchangeReceiptDocument(doc)) {
+			await printExchangeReceipt(doc, profile);
+			return;
+		}
 		const debugPrint = isDebugPrintEnabled();
+		const offline = isOffline();
+		const docname = resolveDocumentName(input.name || doc?.name);
 
+		if (!docname && !offline) {
+			throw new Error("Cannot print document without a submitted document name");
+		}
+
+		// Keep printview auto-trigger disabled; watchPrintWindow/silentPrint owns
+		// the single browser print call so submit-and-print does not prompt twice.
 		let url =
 			frappe.urllib.get_base_url() +
 			"/printview?doctype=" +
 			encodeURIComponent(doctype) +
 			"&name=" +
-			doc.name +
-			"&trigger_print=1" +
+			encodeURIComponent(docname) +
+			"&trigger_print=0" +
 			"&format=" +
-			print_format +
+			encodeURIComponent(print_format || "Standard") +
 			"&no_letterhead=" +
 			letter_head;
 
@@ -119,8 +139,11 @@ export function usePaymentPrinting(options: PaymentPrintingOptions) {
 			},
 		};
 
-		if (profile.posa_open_print_in_new_tab) {
-			if (isOffline()) {
+		const useRawPrint = shouldUseRawDocumentPrinting(profile);
+		const useConfiguredQzPrint = shouldUseConfiguredQzDocumentPrinting(profile);
+
+		if (profile.posa_open_print_in_new_tab && !useRawPrint) {
+			if (offline) {
 				openOfflineInvoicePreview(doc, {
 					debugPrint,
 					printFormatStr: print_format,
@@ -132,10 +155,10 @@ export function usePaymentPrinting(options: PaymentPrintingOptions) {
 				"/printview?doctype=" +
 				encodeURIComponent(doctype) +
 				"&name=" +
-				doc.name +
+				encodeURIComponent(docname) +
 				"&trigger_print=0" +
 				"&format=" +
-				print_format;
+				encodeURIComponent(print_format || "Standard");
 
 			if (profile.letter_head) {
 				newTabUrl +=
@@ -157,27 +180,37 @@ export function usePaymentPrinting(options: PaymentPrintingOptions) {
 			return;
 		}
 
-		if (profile.posa_silent_print) {
-			if (!isOffline()) {
+		if (useConfiguredQzPrint) {
+			if (!offline) {
 				try {
-					await printDocumentViaQz({
+					await printDocumentViaConfiguredQz({
 						doctype,
-						name: doc.name,
+						name: docname,
+						doc,
+						profile,
 						printFormat: print_format || "Standard",
 						letterhead: profile.letter_head || null,
 						noLetterhead: letter_head,
 					});
 					return;
 				} catch (error) {
-					console.warn("QZ Tray print failed, falling back to browser print", error);
+					console.warn("QZ Tray print failed", error);
+					if (confirmDocumentPrintFallback(error, { raw: useRawPrint })) {
+						silentPrint(url, printOptions);
+					}
+					return;
 				}
+			}
+			if (useRawPrint) {
+				const offlineError = new Error("Raw printing is not available while the POS is offline.");
+				if (confirmDocumentPrintFallback(offlineError, { raw: true, offline: true })) {
+					silentPrint(url, printOptions);
+				}
+				return;
 			}
 			silentPrint(url, printOptions);
 		} else {
-			const printWindow = window.open(url, "Print");
-			if (printWindow) {
-				watchPrintWindow(printWindow, printOptions);
-			}
+			silentPrint(url, printOptions);
 		}
 	};
 

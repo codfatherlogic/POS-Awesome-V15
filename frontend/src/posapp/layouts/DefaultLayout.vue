@@ -19,19 +19,59 @@
 				:cache-usage-details="cacheUsageDetails"
 				:loading-progress="loadingProgress"
 				:loading-active="loadingActive"
+				:loading-indeterminate="loadingIndeterminate"
 				:loading-message="loadingMessage"
+				:bootstrap-warning-active="visibleBootstrapWarningActive"
+				:bootstrap-warning-tooltip="visibleBootstrapWarningTooltip"
+				:bootstrap-capabilities="visibleBootstrapCapabilitySummaries"
 				@nav-click="handleNavClick"
 				@close-shift="handleCloseShift"
 				@print-last-invoice="handlePrintLastInvoice"
+				@share-last-invoice="handleShareLastInvoice"
 				@sync-invoices="handleSyncInvoices"
 				@toggle-offline="handleToggleOffline"
 				@retry-status="handleRetryStatus"
+				@refresh-offline-data="handleRefreshOfflineData"
+				@rebuild-offline-data="handleRebuildOfflineData"
+				@open-offline-diagnostics="handleOpenOfflineDiagnostics"
 				@toggle-theme="handleToggleTheme"
 				@logout="handleLogout"
 				@open-customer-display="handleOpenCustomerDisplay"
 				@refresh-cache-usage="handleRefreshCacheUsage"
 				@update-after-delete="handleUpdateAfterDelete"
 			/>
+			<v-snackbar
+				v-model="bootstrapSnackbarVisible"
+				:timeout="8000"
+				:color="bootstrapAlertType"
+				location="top center"
+				class="bootstrap-warning-snackbar"
+			>
+				<div class="bootstrap-warning-snackbar__content">
+					<div class="bootstrap-warning-title">
+						{{ visibleBootstrapWarningTitle }}
+					</div>
+					<div
+						v-for="message in visibleBootstrapWarningMessages"
+						:key="message"
+						class="bootstrap-warning-message"
+					>
+						{{ message }}
+					</div>
+					<div v-if="visibleBootstrapRecoveryMessage" class="bootstrap-warning-message">
+						{{ visibleBootstrapRecoveryMessage }}
+					</div>
+				</div>
+				<template #actions>
+					<v-btn
+						variant="text"
+						class="bootstrap-warning-snackbar__close"
+						@click="bootstrapSnackbarVisible = false"
+					>
+						{{ __("Close") }}
+					</v-btn>
+				</template>
+			</v-snackbar>
 			<div class="page-content">
 				<!-- Replaced router-view with slot for layout usage -->
 				<slot />
@@ -49,22 +89,39 @@ import AppLoadingOverlay from "../components/ui/LoadingOverlay.vue";
 import UpdatePrompt from "../components/ui/UpdatePrompt.vue";
 import { useLoading } from "../composables/core/useLoading.js";
 import { usePosShift } from "../composables/pos/shared/usePosShift";
-import { loadingState, initLoadingSources, setSourceProgress, markSourceLoaded } from "../utils/loading.js";
+import {
+	clearSourceRelease,
+	initLoadingSources,
+	loadingState,
+	markSourceLoaded,
+	scheduleSourceRelease,
+	setSourceProgress,
+} from "../utils/loading.js";
 import { useCustomersStore } from "../stores/customersStore.js";
 import { useSyncStore } from "../stores/syncStore.js";
 import { useToastStore } from "../stores/toastStore.js";
 import { useUIStore } from "../stores/uiStore.js";
 import { useUpdateStore } from "../stores/updateStore.js";
+import { finishStartupPhase, startStartupPhase, traceStartupEvent } from "../../utils/startupTrace";
 import { useItemsStore } from "../stores/itemsStore.js";
+import { usePricingRulesStore } from "../stores/pricingRulesStore";
+import { useOfflineSyncStore } from "../stores/offlineSyncStore";
 import { storeToRefs } from "pinia";
 import {
 	getOpeningStorage,
+	getBootstrapSnapshot,
+	setBootstrapSnapshot,
+	getBootstrapSnapshotStatus,
+	setBootstrapSnapshotStatus,
+	getBootstrapLimitedMode,
+	setBootstrapLimitedMode,
 	getCacheUsageEstimate,
 	checkDbHealth,
 	queueHealthCheck,
 	purgeOldQueueEntries,
 	initPromise,
-	memoryInitPromise,
+	startupInitPromise,
+	ensureOfflineQueueReady,
 	toggleManualOffline,
 	isManualOffline as getIsManualOffline,
 	syncOfflineInvoices,
@@ -73,15 +130,40 @@ import {
 	syncOfflineCashMovements,
 	isOffline,
 	getLastSyncTotals,
+	getSyncResourceDefinitions,
+	getSyncResourceState,
+	listSyncResourceStates,
+	setTaxInclusiveSetting,
 } from "../../offline/index";
+import { SyncCoordinator } from "../../offline/sync/SyncCoordinator";
+import { createOfflineSyncRuntime } from "../../offline/sync/runtime";
 import {
-	setupNetworkListeners as initNetworkListeners,
-	checkNetworkConnectivity as utilsCheckNetworkConnectivity,
-	manualNetworkRetry,
-} from "../composables/core/useNetwork";
+	buildOfflineSyncProfile,
+	filterSupportedOfflineSyncResources,
+	filterSupportedOfflineSyncStates,
+	runSupportedOfflineSyncResource,
+} from "../../offline/sync/resourceRunner";
+import {
+	createBootstrapSnapshotFromRegisterData,
+	resolveBootstrapRuntimeState,
+	validateBootstrapSnapshot,
+} from "../../offline/bootstrapSnapshot";
 import { useRtl } from "../composables/core/useRtl";
+import { useBootSync } from "../composables/runtime/useBootSync";
+import { useNetworkLifecycle } from "../composables/runtime/useNetworkLifecycle";
+import { useUpdateChecks } from "../composables/runtime/useUpdateChecks";
+import { useCustomerReadiness } from "../composables/runtime/useCustomerReadiness";
+import { useQueueMetrics } from "../composables/runtime/useQueueMetrics";
 import authService from "../services/authService.js";
 import { getValidCachedOpeningForCurrentUser } from "../utils/openingCache";
+import { formatBootstrapWarning, shouldShowBootstrapBanner } from "../utils/bootstrapWarnings";
+import { listenForBootstrapSnapshotUpdates } from "../utils/bootstrapRuntimeEvents";
+import {
+	isOfflineSaleModeConfirmed,
+	resolveBootstrapWarningUiState,
+	shouldLiftBootstrapWarningStartupGate,
+} from "../utils/bootstrapWarningVisibility";
+import { resolveOfflineQueueReadiness } from "../utils/offlineQueueReadiness";
 
 /**
  * Frappe Desk UI selectors to hide in POS view.
@@ -110,23 +192,68 @@ const { rtlClasses } = useRtl();
 const instance = getCurrentInstance();
 const $theme = instance?.proxy?.$theme || { toggle: () => {}, isDark: false }; // Fallback
 const __ = instance?.proxy?.__ || ((value) => value);
+const BUILD_VERSION = typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
+const OFFLINE_SYNC_TIMER_INTERVAL_MS = 60_000;
+const PRODUCT_SYNC_SETTLE_TIMEOUT_MS = 120_000;
+const PRODUCT_SYNC_SETTLE_POLL_MS = 250;
+const PRODUCT_CATALOG_BOOTSTRAP_GRACE_MS = 20_000;
 
 // Utils
-const { overlayVisible: globalLoading } = useLoading();
+const createFallbackLoadingScope = () =>
+	computed(() => ({
+		count: 0,
+		kind: "background",
+		blocking: false,
+		message: "",
+		progress: null,
+	}));
+
+const loadingApi = (() => {
+	try {
+		return typeof useLoading === "function" ? useLoading() : null;
+	} catch (error) {
+		console.warn("Falling back to inert POS loading state", error);
+		return null;
+	}
+})();
+const globalLoading = loadingApi?.overlayVisible || ref(false);
+const getScopeState =
+	typeof loadingApi?.getScopeState === "function" ? loadingApi.getScopeState : createFallbackLoadingScope;
 const { get_closing_data } = usePosShift();
 const syncStore = useSyncStore();
 const customersStore = useCustomersStore();
 const itemsStore = useItemsStore();
+const offlineSyncStore = useOfflineSyncStore();
 const toastStore = useToastStore();
 const uiStore = useUIStore();
 const updateStore = useUpdateStore();
+const pricingRulesStore = usePricingRulesStore();
 
 // UI Store State
-const { posProfile, lastInvoiceId } = storeToRefs(uiStore);
+const { posProfile, lastInvoiceId, posOpeningShift } = storeToRefs(uiStore);
 
 const { pendingInvoicesCount } = storeToRefs(syncStore);
-const { loadProgress, customersLoaded } = storeToRefs(customersStore);
-const { itemsLoaded, loadProgress: itemsLoadProgress } = storeToRefs(itemsStore);
+const { loadProgress, customersLoaded, selectedCustomer } = storeToRefs(customersStore);
+const {
+	itemsLoaded,
+	isBackgroundLoading: itemsBackgroundLoading,
+	loadProgress: itemsLoadProgress,
+} = storeToRefs(itemsStore);
+const supportedOfflineSyncResources = filterSupportedOfflineSyncResources(getSyncResourceDefinitions());
+const syncCoordinator = new SyncCoordinator({
+	concurrency: 1,
+	resources: supportedOfflineSyncResources,
+	runResource: async (resource, trigger) => runOfflineSyncResource(resource, trigger),
+	onStateChange: (states) => {
+		offlineSyncStore.setResourceStates(filterSupportedOfflineSyncStates(states));
+	},
+});
+const offlineSyncRuntime = createOfflineSyncRuntime({
+	canSync: canRunOfflineSync,
+	canRunTimerSync: canRunTimerOfflineSync,
+	runTrigger: (trigger) => syncCoordinator.runTrigger(trigger),
+	timerIntervalMs: OFFLINE_SYNC_TIMER_INTERVAL_MS,
+});
 
 // State
 // const posProfile = ref({}); // Migrated to UI Store
@@ -134,52 +261,632 @@ const { itemsLoaded, loadProgress: itemsLoadProgress } = storeToRefs(itemsStore)
 // Network status
 const networkOnline = ref(navigator.onLine || false);
 const serverOnline = ref(false);
-const serverConnecting = ref(false);
+// Until the first health probe settles, an online browser is "Checking", not
+// "Server Offline". This avoids misclassifying a storage-bound cold start.
+const serverConnecting = ref(Boolean(navigator.onLine));
 const internetReachable = ref(false);
 const isIpHost = ref(false);
 
-// Sync data
-const syncTotals = ref({ pending: 0, synced: 0, drafted: 0 });
 const manualOffline = ref(false);
 
-// Cache data
-const cacheUsage = ref(0);
-const cacheUsageLoading = ref(false);
-const cacheUsageDetails = ref({ total: 0, indexedDB: 0, localStorage: 0 });
+const queueMetrics = useQueueMetrics({
+	getCacheUsageEstimate,
+	getPendingOfflineInvoiceCount,
+	getPendingOfflineCashMovementCount,
+	syncOfflineInvoices,
+	syncOfflineCashMovements,
+	isOffline,
+	syncStore,
+	toastStore,
+	translate: __,
+});
+const {
+	cacheUsage,
+	cacheUsageLoading,
+	cacheUsageDetails,
+	syncTotals,
+	refreshCacheUsage,
+	checkCacheCapacity,
+	syncQueues,
+	formatDiagnosticsDetail,
+} = queueMetrics;
+const bootstrapStatus = ref(getBootstrapSnapshotStatus());
+const bootstrapLimitedMode = ref(getBootstrapLimitedMode());
+const bootstrapSnackbarVisible = ref(false);
+const confirmedBootstrapDecisionKey = ref("");
+const initialBootstrapSyncSettled = ref(false);
+const startupBootstrapWarningsReady = ref(false);
+const offlineQueueInitializationError = ref(null);
+const startupOfflineWarmupInFlight = ref(false);
+const startupOfflineWarmupKey = ref("");
 let _sidebarObserver = null;
-let updateInterval = null;
+let _navPollTimer = null;
+let removeBootstrapSnapshotListener = null;
+let cacheCapacityWarningShown = false;
 
 // Event Bus
 const eventBus = instance?.proxy?.eventBus;
 
 // Initialize loading sources immediately in setup so watchers can mark them 100%
 initLoadingSources(["init", "items", "customers"]);
+scheduleSourceRelease("items", PRODUCT_CATALOG_BOOTSTRAP_GRACE_MS, () => {
+	if (itemsLoaded.value) return;
+	traceStartupEvent("ui.product_catalog_progress", "timeout", {
+		progress: itemsLoadProgress.value,
+		itemCount: itemsStore.items.length,
+		backgroundLoading: itemsBackgroundLoading.value,
+	});
+	console.warn("Product catalog is still loading; releasing the startup progress surface.");
+	toastStore.show({
+		title: __("Product catalog is still loading"),
+		detail: __(
+			"The catalog is not ready yet. Loading continues in the background; retry the catalog if products remain unavailable.",
+		),
+		color: "warning",
+	});
+});
+
+const bootSync = useBootSync({
+	offlineSyncRuntime,
+	evaluateBootstrapSnapshot,
+	getLastRunSummary: () => syncCoordinator.getLastRunSummary(),
+});
+
+const updateChecks = useUpdateChecks({
+	updateStore,
+	buildVersion: BUILD_VERSION,
+});
+
+const networkLifecycle = useNetworkLifecycle({
+	networkOnline,
+	serverOnline,
+	serverConnecting,
+	internetReachable,
+	isIpHost,
+	eventBus,
+	realtime: frappe?.realtime,
+	isManualOffline: getIsManualOffline,
+	onSyncInvoices: () => handleSyncInvoices(),
+	onConnectivityRecovered: () => triggerOnlineResumeSync(),
+	onEvaluateBootstrap: (options) => evaluateBootstrapSnapshot(options),
+	onRefreshTaxInclusive: () => refreshTaxInclusiveSetting(),
+});
+
+const customerReadiness = useCustomerReadiness({
+	profile: posProfile,
+	isOnline: () => navigator.onLine,
+	isManualOffline: getIsManualOffline,
+	setProfile: customersStore.setPosProfile,
+	load: customersStore.get_customer_names,
+	onProfileReady: () => {
+		void scheduleBootCriticalWarmSync();
+		if (navigator.onLine && !getIsManualOffline()) {
+			void refreshTaxInclusiveSetting();
+			void refreshOfflinePricingRules();
+		}
+	},
+});
+
+function ensureStartupItemsReady(profile) {
+	if (!profile?.name) {
+		return;
+	}
+
+	const customer = selectedCustomer.value || profile.customer || null;
+	const priceList = profile.selling_price_list || null;
+
+	void startupInitPromise;
+	void itemsStore.initialize(profile, customer, priceList).catch((error) => {
+		console.error("Failed to initialize POS item catalog", error);
+	});
+}
+
+function getCurrentBootstrapProfile() {
+	return posProfile.value || frappe?.boot?.pos_profile || null;
+}
+
+function getCurrentBootstrapOpeningShift() {
+	return posOpeningShift.value || getOpeningStorage()?.pos_opening_shift || null;
+}
+
+function buildBootstrapValidationKey(validation) {
+	return JSON.stringify({
+		mode: validation?.mode || "normal",
+		reasons: validation?.reasons || [],
+		missingPrerequisites: validation?.missingPrerequisites || [],
+	});
+}
+
+function buildCurrentBootstrapValidationInput() {
+	const profile = getCurrentBootstrapProfile();
+	return {
+		buildVersion: BUILD_VERSION,
+		profileName: profile?.name || null,
+		profileModified: profile?.modified || null,
+		sessionUser: frappe?.session?.user || null,
+	};
+}
+
+function ensureBootstrapSnapshotIsCurrent() {
+	const currentSnapshot = getBootstrapSnapshot();
+	const registerData = {
+		pos_profile: getCurrentBootstrapProfile(),
+		pos_opening_shift: getCurrentBootstrapOpeningShift(),
+	};
+
+	if (!registerData.pos_profile && !registerData.pos_opening_shift) {
+		return currentSnapshot;
+	}
+
+	const nextSnapshot = createBootstrapSnapshotFromRegisterData(registerData, currentSnapshot, {
+		buildVersion: BUILD_VERSION,
+	});
+
+	if (JSON.stringify(currentSnapshot || null) !== JSON.stringify(nextSnapshot)) {
+		setBootstrapSnapshot(nextSnapshot);
+	}
+
+	return nextSnapshot;
+}
+
+function persistBootstrapRuntime(validation, decision) {
+	const nextStatus = {
+		mode: validation.mode,
+		runtime_mode: decision.mode,
+		reasons: validation.reasons,
+		missing_prerequisites: validation.missingPrerequisites,
+		warning_codes: decision.warningCodes,
+		capabilities: validation.capabilities,
+		capability_summaries: decision.capabilitySummaries,
+		primary_warning: decision.primaryWarning,
+	};
+
+	bootstrapStatus.value = nextStatus;
+	bootstrapLimitedMode.value = decision.limitedMode;
+	setBootstrapSnapshotStatus(nextStatus);
+	setBootstrapLimitedMode(decision.limitedMode);
+}
+
+function buildBootstrapConfirmationMessage(validation) {
+	const details = Array.from(
+		new Set((validation?.reasons || []).map((code) => formatBootstrapWarning(code, __))),
+	);
+
+	return [
+		__("Offline snapshot does not match the current POS state."),
+		...details,
+		__("Press OK to continue offline with a warning, or Cancel to retry."),
+	].join("\n\n");
+}
+
+function evaluateBootstrapSnapshot(options = {}) {
+	const allowPrompt = !!options.allowPrompt;
+	const snapshot = ensureBootstrapSnapshotIsCurrent();
+	const validation = validateBootstrapSnapshot(snapshot, buildCurrentBootstrapValidationInput());
+	const decisionKey = buildBootstrapValidationKey(validation);
+	let decision = resolveBootstrapRuntimeState(validation, {
+		continueOffline: confirmedBootstrapDecisionKey.value === decisionKey,
+	});
+
+	if (decision.requiresConfirmation && allowPrompt) {
+		const confirmed = window.confirm(buildBootstrapConfirmationMessage(validation));
+
+		if (confirmed) {
+			confirmedBootstrapDecisionKey.value = decisionKey;
+			decision = resolveBootstrapRuntimeState(validation, {
+				continueOffline: true,
+			});
+		} else {
+			confirmedBootstrapDecisionKey.value = "";
+			persistBootstrapRuntime(validation, decision);
+			window.location.reload();
+			return decision;
+		}
+	} else if (validation.mode !== "confirmation_required") {
+		confirmedBootstrapDecisionKey.value = "";
+	}
+
+	persistBootstrapRuntime(validation, decision);
+	return decision;
+}
+
+function getOfflineSyncProfile() {
+	return buildOfflineSyncProfile(getCurrentBootstrapProfile());
+}
+
+function buildDefaultPricingRulesContext() {
+	const profile = getCurrentBootstrapProfile();
+	return {
+		company: profile?.company || null,
+		price_list: profile?.selling_price_list || null,
+		currency: profile?.currency || null,
+		date: new Date().toISOString().slice(0, 10),
+	};
+}
+
+async function refreshOfflinePricingRules(options = {}) {
+	if (!canRunOfflineSync()) {
+		return false;
+	}
+
+	const context = buildDefaultPricingRulesContext();
+	if (!context.company || !context.price_list || !context.currency) {
+		return false;
+	}
+
+	try {
+		await pricingRulesStore.ensureActiveRules(context, {
+			force: options.force === true,
+		});
+		return true;
+	} catch (error) {
+		console.error("Failed to refresh offline pricing rules", error);
+		return false;
+	}
+}
+
+function canRunOfflineSync() {
+	return !!(getOfflineSyncProfile()?.name && !getIsManualOffline() && navigator.onLine);
+}
+
+function canRunTimerOfflineSync() {
+	return !!(canRunOfflineSync() && serverOnline.value && !serverConnecting.value);
+}
+
+function waitForItemsBackgroundSync(timeoutMs = PRODUCT_SYNC_SETTLE_TIMEOUT_MS) {
+	return new Promise((resolve) => {
+		const startedAt = Date.now();
+		const poll = () => {
+			if (!itemsBackgroundLoading.value) {
+				resolve(true);
+				return;
+			}
+			if (Date.now() - startedAt >= timeoutMs) {
+				resolve(false);
+				return;
+			}
+			setTimeout(poll, PRODUCT_SYNC_SETTLE_POLL_MS);
+		};
+		poll();
+	});
+}
+
+async function refreshOfflineProductCatalog() {
+	const profile = getCurrentBootstrapProfile();
+	if (!profile?.name || !canRunOfflineSync()) {
+		return false;
+	}
+
+	try {
+		await startupInitPromise;
+		if (!itemsStore.posProfile?.name) {
+			await itemsStore.initialize(
+				profile,
+				selectedCustomer.value || profile.customer || null,
+				profile.selling_price_list || null,
+			);
+		}
+		await itemsStore.refreshItems();
+		await waitForItemsBackgroundSync();
+		return true;
+	} catch (error) {
+		console.error("Failed to refresh offline product catalog", error);
+		return false;
+	}
+}
+
+async function callOfflineSyncMethod(method, args = {}) {
+	if (typeof frappe === "undefined" || typeof frappe.call !== "function") {
+		throw new Error("Frappe call API is unavailable");
+	}
+	const response = await frappe.call({
+		method,
+		args,
+	});
+	return typeof response?.message === "undefined" ? response || {} : response.message;
+}
+
+async function runOfflineSyncResource(resource) {
+	const profile = getOfflineSyncProfile();
+	if (!profile?.name) {
+		return {
+			status: "idle",
+		};
+	}
+
+	return runSupportedOfflineSyncResource({
+		resource,
+		posProfile: profile,
+		getPersistedState: getSyncResourceState,
+		getRuntimeState: (resourceId) => syncCoordinator.getResourceState(resourceId),
+		callOfflineSyncMethod,
+	});
+}
+
+async function hydrateOfflineSyncResourceStates() {
+	try {
+		const states = filterSupportedOfflineSyncStates(await listSyncResourceStates());
+		syncCoordinator.hydrateResourceStates(states);
+	} catch (error) {
+		console.error("Failed to hydrate offline sync state", error);
+	}
+}
+
+function scheduleBootCriticalWarmSync() {
+	return bootSync.scheduleBootCriticalWarmSync();
+}
+
+function triggerOnlineResumeSync() {
+	return bootSync.triggerOnlineResumeSync().then(async (result) => {
+		await refreshOfflinePricingRules();
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+		return result;
+	});
+}
+
+function triggerOperatorRefreshSync(options = {}) {
+	return bootSync.triggerOperatorRefreshSync(options);
+}
+
+async function runStartupOfflineDataWarmup(reason = "startup") {
+	const profile = getOfflineSyncProfile();
+	if (
+		startupOfflineWarmupInFlight.value ||
+		!initialBootstrapSyncSettled.value ||
+		!profile?.name ||
+		getIsManualOffline() ||
+		!navigator.onLine
+	) {
+		return false;
+	}
+
+	const warmupKey = [
+		BUILD_VERSION || "",
+		profile.name || "",
+		profile.modified || "",
+		profile.selling_price_list || "",
+		profile.currency || "",
+		reason,
+	].join("::");
+	if (startupOfflineWarmupKey.value === warmupKey) {
+		return false;
+	}
+
+	startupOfflineWarmupInFlight.value = true;
+	try {
+		await triggerOperatorRefreshSync({ includeBootSync: true });
+		await refreshOfflinePricingRules();
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+		startupOfflineWarmupKey.value = warmupKey;
+		return true;
+	} catch (error) {
+		console.error("Failed to warm offline data after startup", error);
+		return false;
+	} finally {
+		startupOfflineWarmupInFlight.value = false;
+	}
+}
 
 // Computed
-const loadingProgress = computed(() => loadingState.progress);
-const loadingActive = computed(() => loadingState.active);
-const loadingMessage = computed(() => loadingState.message);
-
-// Watchers
-watch(networkOnline, (newVal, oldVal) => {
-	if (newVal && !oldVal) {
-		refreshTaxInclusiveSetting();
-		eventBus?.emit("network-online");
-		handleSyncInvoices();
+const routeLoadingState = getScopeState("route");
+const loadingActive = computed(() => loadingState.active || routeLoadingState.value.count > 0);
+const loadingIndeterminate = computed(() => !loadingState.active && routeLoadingState.value.count > 0);
+const loadingMessage = computed(() => {
+	if (loadingState.active) {
+		return loadingState.message;
 	}
+	return routeLoadingState.value.message || __("Loading view...");
+});
+const loadingProgress = computed(() => {
+	if (loadingState.active) {
+		return loadingState.progress;
+	}
+	return 0;
+});
+const bootstrapAlertType = computed(() =>
+	offlineQueueInitializationError.value ||
+	bootstrapStatus.value?.primary_warning?.severity === "error" ||
+	bootstrapStatus.value?.runtime_mode === "invalid"
+		? "error"
+		: "warning",
+);
+const bootstrapCapabilitySummaries = computed(() => bootstrapStatus.value?.capability_summaries || []);
+const bootstrapWarningTitle = computed(() => {
+	if (offlineQueueInitializationError.value) {
+		return __("Sell Offline");
+	}
+	if (bootstrapStatus.value?.primary_warning?.title) {
+		return __(bootstrapStatus.value.primary_warning.title);
+	}
+	if (bootstrapStatus.value?.runtime_mode === "invalid") {
+		return __("Offline restore is unavailable for this session.");
+	}
+	if (bootstrapLimitedMode.value) {
+		return __("Offline selling is available with degraded capabilities.");
+	}
+	return "";
+});
+const bootstrapWarningMessages = computed(() => {
+	const messages = [];
+	if (offlineQueueInitializationError.value) {
+		messages.push(
+			__("Offline invoice storage is unavailable. Stay online until browser storage is restored."),
+		);
+	}
+
+	if (shouldShowBootstrapBanner(bootstrapStatus.value)) {
+		if (Array.isArray(bootstrapStatus.value?.primary_warning?.messages)) {
+			messages.push(...bootstrapStatus.value.primary_warning.messages.map((message) => __(message)));
+		} else {
+			messages.push(
+				...(bootstrapStatus.value?.warning_codes || []).map((code) =>
+					formatBootstrapWarning(code, __),
+				),
+			);
+		}
+	}
+
+	return Array.from(new Set(messages));
+});
+const bootstrapWarningActive = computed(() => bootstrapWarningMessages.value.length > 0);
+const bootstrapRecoveryMessage = computed(() => {
+	if (!bootstrapWarningActive.value) {
+		return "";
+	}
+	if (offlineQueueInitializationError.value) {
+		return __(
+			"Free browser storage or enable site storage, then run Refresh Offline Data before selling offline.",
+		);
+	}
+
+	return __(
+		"If the warning persists, open Settings > Offline & Sync, then run Refresh Offline Data or Rebuild Offline Data.",
+	);
+});
+const bootstrapWarningTooltip = computed(() => {
+	if (!bootstrapWarningActive.value) {
+		return "";
+	}
+
+	return [bootstrapWarningTitle.value, ...bootstrapWarningMessages.value, bootstrapRecoveryMessage.value]
+		.filter(Boolean)
+		.join("\n");
+});
+const offlineSaleModeConfirmed = computed(() =>
+	isOfflineSaleModeConfirmed({
+		manualOffline: manualOffline.value || getIsManualOffline(),
+		browserOnline: navigator.onLine,
+		networkOnline: networkOnline.value,
+		serverOnline: serverOnline.value,
+		serverConnecting: serverConnecting.value,
+		serverStatusKnown: typeof window.serverOnline === "boolean",
+	}),
+);
+const bootstrapWarningUiState = computed(() =>
+	resolveBootstrapWarningUiState({
+		startupWarningsReady: startupBootstrapWarningsReady.value,
+		warningActive: bootstrapWarningActive.value,
+		warningTooltip: bootstrapWarningTooltip.value,
+		capabilitySummaries: bootstrapCapabilitySummaries.value,
+		offlineSaleModeConfirmed: offlineSaleModeConfirmed.value,
+	}),
+);
+const visibleBootstrapWarningActive = computed(() => bootstrapWarningUiState.value.active);
+const visibleBootstrapWarningTooltip = computed(() => bootstrapWarningUiState.value.tooltip);
+const visibleBootstrapCapabilitySummaries = computed(() => bootstrapWarningUiState.value.capabilitySummaries);
+const visibleBootstrapWarningTitle = computed(() =>
+	visibleBootstrapWarningActive.value ? bootstrapWarningTitle.value : "",
+);
+const visibleBootstrapWarningMessages = computed(() =>
+	visibleBootstrapWarningActive.value ? bootstrapWarningMessages.value : [],
+);
+const visibleBootstrapRecoveryMessage = computed(() =>
+	visibleBootstrapWarningActive.value ? bootstrapRecoveryMessage.value : "",
+);
+const bootstrapWarningSignature = computed(() => {
+	if (!visibleBootstrapWarningActive.value) {
+		return "";
+	}
+
+	return JSON.stringify({
+		type: bootstrapAlertType.value,
+		title: visibleBootstrapWarningTitle.value,
+		messages: visibleBootstrapWarningMessages.value,
+	});
 });
 
-watch(serverOnline, (newVal, oldVal) => {
-	if (newVal && !oldVal) {
-		eventBus?.emit("server-online");
-		handleSyncInvoices();
-	}
-});
+watch(
+	() => [
+		posProfile.value?.name || null,
+		posProfile.value?.modified || null,
+		posOpeningShift.value?.name || null,
+		posOpeningShift.value?.user || null,
+	],
+	() => {
+		evaluateBootstrapSnapshot({
+			allowPrompt: getIsManualOffline() || !navigator.onLine,
+		});
+	},
+);
+
+watch(
+	posProfile,
+	(profile) => {
+		ensureStartupItemsReady(profile);
+	},
+	{ deep: true, immediate: true },
+);
+
+watch(
+	() => [
+		initialBootstrapSyncSettled.value,
+		startupBootstrapWarningsReady.value,
+		networkOnline.value,
+		serverOnline.value,
+		serverConnecting.value,
+		posProfile.value?.name || null,
+		posProfile.value?.modified || null,
+		posProfile.value?.selling_price_list || null,
+		posProfile.value?.currency || null,
+	],
+	([isInitialSyncSettled, areWarningsReady, isNetworkOnline, isServerOnline, isServerConnecting]) => {
+		if (
+			isInitialSyncSettled &&
+			areWarningsReady &&
+			isNetworkOnline &&
+			isServerOnline &&
+			!isServerConnecting
+		) {
+			void runStartupOfflineDataWarmup("post_load_online");
+		}
+	},
+	{ immediate: true },
+);
 
 watch(
 	loadProgress,
 	(progress) => {
 		setSourceProgress("customers", progress);
+	},
+	{ immediate: true },
+);
+
+watch(
+	bootstrapWarningSignature,
+	(nextSignature, previousSignature) => {
+		if (!nextSignature) {
+			bootstrapSnackbarVisible.value = false;
+			return;
+		}
+
+		if (nextSignature !== previousSignature) {
+			bootstrapSnackbarVisible.value = true;
+		}
+	},
+	{ immediate: true },
+);
+
+watch(
+	() => [
+		loadingActive.value,
+		initialBootstrapSyncSettled.value,
+		itemsLoaded.value,
+		itemsBackgroundLoading.value,
+	],
+	([isLoading, isBootstrapSettled, areItemsLoaded, areItemsSyncing]) => {
+		const shouldLift = shouldLiftBootstrapWarningStartupGate({
+			loadingActive: Boolean(isLoading),
+			initialBootstrapSettled: Boolean(isBootstrapSettled),
+			itemsStartupSyncSettled: Boolean(areItemsLoaded) && !areItemsSyncing,
+			startupGateLifted: startupBootstrapWarningsReady.value,
+		});
+
+		if (!shouldLift || startupBootstrapWarningsReady.value) {
+			return;
+		}
+
+		startupBootstrapWarningsReady.value = true;
+		evaluateBootstrapSnapshot({ allowPrompt: false });
 	},
 	{ immediate: true },
 );
@@ -215,33 +922,31 @@ watch(
 // Lifecycle Hooks
 onMounted(() => {
 	pollForFrappeNav();
+	removeBootstrapSnapshotListener = listenForBootstrapSnapshotUpdates(() => {
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+	});
 
 	window.addEventListener("resize", adjust_frappe_sidebar_offset);
 	// initLoadingSources move to setup to catch early store readiness
 	initializeData();
-	setupNetworkListeners(); // Local function wrapper
+	bootSync.start();
+	networkLifecycle.start();
+	customerReadiness.start();
 	setupEventListeners();
 	handleRefreshCacheUsage();
-
-	updateStore.initializeFromStorage();
-	// @ts-ignore
-	const BUILD_VERSION =
-		typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
-	if (BUILD_VERSION) {
-		updateStore.setCurrentVersion(BUILD_VERSION);
-	}
-	updateStore.checkForUpdates(true);
-	updateInterval = setInterval(
-		() => updateStore.checkForUpdates(),
-		24 * 60 * 60 * 1000,
-	);
+	updateChecks.start();
 });
 
 onBeforeUnmount(() => {
-	if (updateInterval) {
-		clearInterval(updateInterval);
-		updateInterval = null;
+	clearSourceRelease("items");
+	updateChecks.stop();
+	if (removeBootstrapSnapshotListener) {
+		removeBootstrapSnapshotListener();
+		removeBootstrapSnapshotListener = null;
 	}
+	bootSync.stop();
+	networkLifecycle.stop();
+	customerReadiness.stop();
 	if (eventBus) {
 		eventBus.off("data-loaded");
 		eventBus.off("register_pos_profile");
@@ -252,6 +957,11 @@ onBeforeUnmount(() => {
 	}
 
 	window.removeEventListener("resize", adjust_frappe_sidebar_offset);
+
+	if (_navPollTimer) {
+		clearTimeout(_navPollTimer);
+		_navPollTimer = null;
+	}
 
 	if (_sidebarObserver) {
 		_sidebarObserver.disconnect();
@@ -270,63 +980,79 @@ const pollForFrappeNav = (maxAttempts = 50, interval = 100) => {
 			remove_frappe_nav();
 			setup_sidebar_observer();
 		} else {
-			setTimeout(checkAndRemove, interval);
+			_navPollTimer = setTimeout(checkAndRemove, interval);
 		}
 	};
 	checkAndRemove();
 };
 
-// Network Logic - Bridge mixin-style composable to Composition API refs.
-const networkProxy = {
-	get networkOnline() {
-		return networkOnline.value;
-	},
-	set networkOnline(value) {
-		networkOnline.value = Boolean(value);
-	},
-	get serverOnline() {
-		return serverOnline.value;
-	},
-	set serverOnline(value) {
-		serverOnline.value = Boolean(value);
-	},
-	get serverConnecting() {
-		return serverConnecting.value;
-	},
-	set serverConnecting(value) {
-		serverConnecting.value = Boolean(value);
-	},
-	get internetReachable() {
-		return internetReachable.value;
-	},
-	set internetReachable(value) {
-		internetReachable.value = Boolean(value);
-	},
-	get isIpHost() {
-		return isIpHost.value;
-	},
-	set isIpHost(value) {
-		isIpHost.value = Boolean(value);
-	},
-	$forceUpdate: () => {},
-	checkNetworkConnectivity: async (options = {}) => {
-		await utilsCheckNetworkConnectivity.call(networkProxy, options);
-	},
+const notifyCacheCapacityIfActionable = (usage = {}) => {
+	const pendingInvoices = getPendingOfflineInvoiceCount();
+	const pendingCashMovements = getPendingOfflineCashMovementCount();
+	const pendingTotal = pendingInvoices + pendingCashMovements;
+	if (cacheCapacityWarningShown || pendingTotal <= 0) {
+		return;
+	}
+
+	cacheCapacityWarningShown = true;
+	const offlineNow = isOffline();
+	toastStore.show({
+		title: __("Local cache usage is high"),
+		detail: offlineNow
+			? __("Reconnect online to sync {0} pending local record(s). Cache usage is {1}%.", [
+					pendingTotal,
+					Math.round(usage.percentage || 0),
+				])
+			: __("Sync {0} pending local record(s). Cache usage is {1}%.", [
+					pendingTotal,
+					Math.round(usage.percentage || 0),
+				]),
+		color: "warning",
+	});
 };
 
-const setupNetworkListeners = () => {
-	initNetworkListeners.call(networkProxy);
+const initializeOfflineQueueReadiness = async () => {
+	const result = await resolveOfflineQueueReadiness(() => ensureOfflineQueueReady());
+	offlineQueueInitializationError.value = result.error;
+	if (!result.ready) {
+		console.error(
+			"Offline invoice storage is unavailable; continuing the online POS bootstrap",
+			result.error,
+		);
+	}
+	return result.ready;
+};
+
+const finishInitialOfflineResourceSync = async () => {
+	const phase = startStartupPhase("offline.initial_resource_sync");
+	try {
+		await scheduleBootCriticalWarmSync();
+		await refreshOfflinePricingRules();
+		finishStartupPhase(phase, "ok", {
+			resources: syncCoordinator.getLastRunSummary(),
+		});
+	} catch (error) {
+		console.error("Initial offline resource sync failed", error);
+		finishStartupPhase(phase, "error", { error });
+	} finally {
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+		initialBootstrapSyncSettled.value = true;
+		void runStartupOfflineDataWarmup("initial_load");
+	}
 };
 
 const initializeData = async () => {
-	await initPromise;
-	await memoryInitPromise;
+	const phase = startStartupPhase("ui.final_store_hydration");
+	await startupInitPromise;
+	void initPromise.then(
+		() => traceStartupEvent("indexeddb.full_memory_hydration", "ok"),
+		(error) => traceStartupEvent("indexeddb.full_memory_hydration", "error", { error }),
+	);
+	await initializeOfflineQueueReadiness();
+	await hydrateOfflineSyncResourceStates();
 	checkDbHealth().catch(() => {});
 	// Offline-first bootstrap: hydrate register state from IndexedDB before server checks.
-	const openingData = getValidCachedOpeningForCurrentUser(
-		getOpeningStorage(),
-		frappe?.session?.user,
-	);
+	const openingData = getValidCachedOpeningForCurrentUser(getOpeningStorage(), frappe?.session?.user);
 	if (openingData) {
 		uiStore.setRegisterData(openingData);
 		if (navigator.onLine) {
@@ -335,20 +1061,16 @@ const initializeData = async () => {
 	}
 
 	if (queueHealthCheck()) {
-		alert("Offline queue is too large. Old entries will be purged.");
-		purgeOldQueueEntries();
+		const pruned = purgeOldQueueEntries();
+		if (pruned > 0) {
+			alert("Old synced offline queue entries were pruned.");
+		}
 	}
 
 	await syncStore.updatePendingCount();
 	syncTotals.value = getLastSyncTotals();
 
-	getCacheUsageEstimate()
-		.then((usage) => {
-			if (usage.percentage > 90) {
-				alert("Local cache nearing capacity. Consider going online to sync.");
-			}
-		})
-		.catch(() => {});
+	void checkCacheCapacity(90, notifyCacheCapacityIfActionable);
 
 	// Check if running on IP host
 	isIpHost.value = /^\d+\.\d+\.\d+\.\d+/.test(window.location.hostname);
@@ -360,41 +1082,21 @@ const initializeData = async () => {
 		serverOnline.value = false;
 		window.serverOnline = false;
 	}
-
+	evaluateBootstrapSnapshot({
+		allowPrompt: manualOffline.value || !navigator.onLine,
+	});
+	// The shell and catalog are usable at this boundary. Offline resource
+	// freshness continues independently and must not hold the startup overlay.
 	markSourceLoaded("init");
-
-	// Trigger initial customer load only when POS profile is already available
-	if (
-		navigator.onLine &&
-		!isOffline() &&
-		posProfile.value &&
-		posProfile.value.name
-	) {
-		customersStore.setPosProfile(posProfile.value);
-		customersStore.get_customer_names();
-	}
+	finishStartupPhase(phase, "ok", {
+		profile: posProfile.value?.name || null,
+		openingShift: posOpeningShift.value?.name || null,
+	});
+	void finishInitialOfflineResourceSync();
 };
 
 const setupEventListeners = () => {
-	// Listen for POS profile registration
 	if (eventBus) {
-		// Watch for POS profile becoming available to trigger customer load
-		watch(
-			posProfile,
-			(newProfile) => {
-				if (newProfile && newProfile.name) {
-					// Update customers store with profile
-					customersStore.setPosProfile(newProfile);
-
-					if (navigator.onLine && !getIsManualOffline()) {
-						refreshTaxInclusiveSetting();
-						customersStore.get_customer_names();
-					}
-				}
-			},
-			{ deep: true, immediate: true },
-		);
-
 		// Track last submitted invoice id
 		// eventBus.on("set_last_invoice", (invoiceId) => {
 		// 	uiStore.setLastInvoice(invoiceId);
@@ -418,40 +1120,6 @@ const setupEventListeners = () => {
 			handleSyncInvoices();
 		});
 	}
-
-	// Enhanced server connection status listeners
-	if (frappe.realtime) {
-		frappe.realtime.on("connect", () => {
-			serverOnline.value = true;
-			window.serverOnline = true;
-			serverConnecting.value = false;
-			console.log("Server: Connected via WebSocket");
-		});
-
-		frappe.realtime.on("disconnect", () => {
-			serverOnline.value = false;
-			window.serverOnline = false;
-			serverConnecting.value = false;
-			console.log("Server: Disconnected from WebSocket");
-		});
-
-		frappe.realtime.on("connecting", () => {
-			serverConnecting.value = true;
-			console.log("Server: Connecting to WebSocket...");
-		});
-
-		frappe.realtime.on("reconnect", () => {
-			console.log("Server: Reconnected to WebSocket");
-			window.serverOnline = true;
-		});
-	}
-
-	// Visibility Listener
-	document.addEventListener("visibilitychange", () => {
-		if (!document.hidden && navigator.onLine && !getIsManualOffline()) {
-			// checkNetworkConnectivity();
-		}
-	});
 };
 
 const handleNavClick = () => {
@@ -462,48 +1130,12 @@ const handleCloseShift = () => {
 	get_closing_data();
 };
 
+const handleShareLastInvoice = () => {
+	eventBus?.emit("share_last_invoice");
+};
+
 const handleSyncInvoices = async () => {
-	const pending = getPendingOfflineInvoiceCount();
-	const pendingCashMovements = getPendingOfflineCashMovementCount();
-	if (pending) {
-		toastStore.show({
-			title: `${pending} invoice${pending > 1 ? "s" : ""} pending for sync`,
-			color: "warning",
-		});
-	}
-	if (pendingCashMovements) {
-		toastStore.show({
-			title: `${pendingCashMovements} cash movement${pendingCashMovements > 1 ? "s" : ""} pending for sync`,
-			color: "warning",
-		});
-	}
-	if (isOffline()) {
-		return;
-	}
-	const result = await syncOfflineInvoices();
-	const cashMovementResult = await syncOfflineCashMovements();
-	if (result && (result.synced || result.drafted)) {
-		if (result.synced) {
-			toastStore.show({
-				title: `${result.synced} offline invoice${result.synced > 1 ? "s" : ""} synced`,
-				color: "success",
-			});
-		}
-		if (result.drafted) {
-			toastStore.show({
-				title: `${result.drafted} offline invoice${result.drafted > 1 ? "s" : ""} saved as draft`,
-				color: "warning",
-			});
-		}
-	}
-	if (cashMovementResult?.synced) {
-		toastStore.show({
-			title: `${cashMovementResult.synced} offline cash movement${cashMovementResult.synced > 1 ? "s" : ""} synced`,
-			color: "success",
-		});
-	}
-	syncStore.updatePendingCount();
-	syncTotals.value = result || syncTotals.value;
+	await syncQueues();
 };
 
 const handleToggleOffline = () => {
@@ -518,6 +1150,9 @@ const handleToggleOffline = () => {
 		// Optimistically set online if browser is online
 		networkOnline.value = navigator.onLine;
 	}
+	evaluateBootstrapSnapshot({
+		allowPrompt: manualOffline.value || !navigator.onLine,
+	});
 };
 
 const handleRetryStatus = async () => {
@@ -531,7 +1166,71 @@ const handleRetryStatus = async () => {
 	}
 
 	networkOnline.value = navigator.onLine;
-	manualNetworkRetry(networkProxy);
+	await networkLifecycle.retry();
+};
+
+const handleRefreshOfflineData = async () => {
+	handleRefreshCacheUsage();
+	await initializeOfflineQueueReadiness();
+	evaluateBootstrapSnapshot({
+		allowPrompt: getIsManualOffline() || !navigator.onLine,
+	});
+	if (!getIsManualOffline() && navigator.onLine) {
+		await handleRetryStatus();
+		await triggerOperatorRefreshSync();
+		await refreshOfflineProductCatalog();
+		await refreshTaxInclusiveSetting();
+		await refreshOfflinePricingRules({ force: true });
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+	}
+	toastStore.show({
+		title: __("Offline data status refreshed"),
+		detail: navigator.onLine
+			? __("Connectivity and cached prerequisite status were rechecked.")
+			: __("Reconnect online to refresh cached offline data from the server."),
+		color: navigator.onLine ? "info" : "warning",
+	});
+};
+
+const handleRebuildOfflineData = async () => {
+	handleRefreshCacheUsage();
+	await initializeOfflineQueueReadiness();
+	evaluateBootstrapSnapshot({
+		allowPrompt: true,
+	});
+	if (canRunOfflineSync()) {
+		await triggerOperatorRefreshSync({ includeBootSync: true });
+		await refreshOfflineProductCatalog();
+		await refreshTaxInclusiveSetting();
+		await refreshOfflinePricingRules({ force: true });
+		evaluateBootstrapSnapshot({ allowPrompt: false });
+	}
+	toastStore.show({
+		title: __("Offline rebuild guidance"),
+		detail: __(
+			"If stale data remains, open Settings > Offline & Sync and run Rebuild Offline Data again while online.",
+		),
+		color: "warning",
+	});
+};
+
+const handleOpenOfflineDiagnostics = () => {
+	handleRefreshCacheUsage();
+	const lastRunSummary = syncCoordinator.getLastRunSummary();
+	const syncSummary =
+		lastRunSummary && lastRunSummary.resourcesTotal
+			? __("Last sync: {0} | ok: {1} | failed: {2} | skipped: {3}", [
+					lastRunSummary.trigger,
+					lastRunSummary.succeeded,
+					lastRunSummary.failed,
+					lastRunSummary.skipped,
+				])
+			: __("No sync trigger has run yet in this session.");
+	toastStore.show({
+		title: __("Offline diagnostics"),
+		detail: formatDiagnosticsDetail(pendingInvoicesCount.value || 0, syncSummary),
+		color: visibleBootstrapWarningActive.value ? "warning" : "info",
+	});
 };
 
 const handleToggleTheme = () => {
@@ -549,27 +1248,12 @@ const handleOpenCustomerDisplay = () => {
 };
 
 const handleRefreshCacheUsage = () => {
-	cacheUsageLoading.value = true;
-	getCacheUsageEstimate()
-		.then((usage) => {
-			cacheUsage.value = usage.percentage || 0;
-			cacheUsageDetails.value = {
-				total: usage.total || 0,
-				indexedDB: usage.indexedDB || 0,
-				localStorage: usage.localStorage || 0,
-			};
-		})
-		.catch((e) => {
-			console.error("Failed to refresh cache usage", e);
-		})
-		.finally(() => {
-			cacheUsageLoading.value = false;
-		});
+	void refreshCacheUsage();
 };
 
 const refreshTaxInclusiveSetting = async () => {
 	if (!posProfile.value || !posProfile.value.name || !navigator.onLine) {
-		return;
+		return false;
 	}
 	try {
 		const r = await frappe.call({
@@ -579,23 +1263,13 @@ const refreshTaxInclusiveSetting = async () => {
 			},
 		});
 		if (r.message !== undefined) {
-			const val = r.message;
-			try {
-				localStorage.setItem("posa_tax_inclusive", JSON.stringify(val));
-			} catch (err) {
-				console.warn("Failed to cache tax inclusive setting", err);
-			}
-			import("../../offline/index")
-				.then((m) => {
-					if (m && m.setTaxInclusiveSetting) {
-						m.setTaxInclusiveSetting(val);
-					}
-				})
-				.catch(() => {});
+			setTaxInclusiveSetting(r.message);
+			return true;
 		}
 	} catch (e) {
 		console.warn("Failed to refresh tax inclusive setting", e);
 	}
+	return false;
 };
 
 const handleUpdateAfterDelete = () => {
@@ -672,7 +1346,43 @@ const adjust_frappe_sidebar_offset = () => {
 	min-height: 0;
 	overflow: auto;
 	overscroll-behavior: contain;
-	padding-top: 8px;
+	padding-top: 6px;
+	background:
+		linear-gradient(
+			90deg,
+			color-mix(in srgb, var(--pos-primary-container) 18%, transparent) 1px,
+			transparent 1px
+		),
+		linear-gradient(
+			color-mix(in srgb, var(--pos-primary-container) 14%, transparent) 1px,
+			transparent 1px
+		);
+	background-size: 32px 32px;
+	background-position: -1px -1px;
+}
+
+.bootstrap-warning-snackbar :deep(.v-snackbar__wrapper) {
+	max-width: min(680px, calc(100vw - 24px));
+}
+
+.bootstrap-warning-snackbar__content {
+	white-space: normal;
+}
+
+.bootstrap-warning-title {
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.bootstrap-warning-title,
+.bootstrap-warning-message {
+	white-space: normal;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
+.bootstrap-warning-message + .bootstrap-warning-message {
+	margin-top: 4px;
 }
 
 /* Ensure proper spacing and prevent layout shifts */

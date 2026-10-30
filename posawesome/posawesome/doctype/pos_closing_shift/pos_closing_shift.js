@@ -16,7 +16,7 @@ frappe.ui.form.on("POS Closing Shift", {
 			};
 		});
 
-		frm.set_query("pos_opening_shift", function (doc) {
+		frm.set_query("pos_opening_shift", function () {
 			return { filters: { status: "Open", docstatus: 1 } };
 		});
 
@@ -128,13 +128,20 @@ function add_to_pos_transaction(d, frm) {
 }
 
 function add_to_pos_payments(d, frm) {
-	frm.add_child("pos_payments", {
+	const child = {
 		payment_entry: d.name,
 		posting_date: d.posting_date,
 		paid_amount: d.paid_amount,
-		customer: d.party,
+		party_type: d.party_type,
+		party: d.party,
 		mode_of_payment: d.mode_of_payment,
-	});
+	};
+
+	if (d.party_type === "Customer") {
+		child.customer = d.party;
+	}
+
+	frm.add_child("pos_payments", child);
 }
 
 async function add_to_payments(d, frm, conversion_rate) {
@@ -142,24 +149,59 @@ async function add_to_payments(d, frm, conversion_rate) {
 	const cash_mode_of_payment = await get_cash_mode_of_payment(frm);
 
 	payments.forEach((p) => {
+		const currency = p.posa_payment_currency || d.currency || frm.doc.company_currency;
 		const payment = frm.doc.payment_reconciliation.find(
-			(pay) => pay.mode_of_payment === p.mode_of_payment,
+			(pay) =>
+				pay.mode_of_payment === p.mode_of_payment &&
+				(pay.currency || frm.doc.company_currency) === currency,
 		);
+		const originalAmount = flt(p.posa_original_amount ?? p.amount);
+		const baseAmount = get_base_value(p, "amount", "base_amount", conversion_rate);
 		if (payment) {
-			let amount = get_base_value(p, "amount", "base_amount", conversion_rate);
-
-			if (payment.mode_of_payment === cash_mode_of_payment) {
-				amount -= get_base_value(d, "change_amount", "base_change_amount", conversion_rate);
-			}
-			payment.expected_amount += flt(amount);
+			payment.expected_amount += flt(baseAmount);
+			payment.expected_amount_in_currency += originalAmount;
 		} else {
 			frm.add_child("payment_reconciliation", {
 				mode_of_payment: p.mode_of_payment,
+				currency,
 				opening_amount: 0,
-				expected_amount: get_base_value(p, "amount", "base_amount", conversion_rate),
+				opening_amount_in_currency: 0,
+				expected_amount: baseAmount,
+				expected_amount_in_currency: originalAmount,
 			});
 		}
 	});
+
+	const changeRows = Array.isArray(d.posa_change_returns) ? d.posa_change_returns : [];
+	if (changeRows.length) {
+		changeRows.forEach((row) => {
+			const currency = row.currency || d.currency || frm.doc.company_currency;
+			let payment = frm.doc.payment_reconciliation.find(
+				(pay) => pay.mode_of_payment === cash_mode_of_payment && (pay.currency || frm.doc.company_currency) === currency,
+			);
+			if (!payment) {
+				payment = frm.add_child("payment_reconciliation", {
+					mode_of_payment: cash_mode_of_payment,
+					currency,
+					opening_amount: 0,
+					opening_amount_in_currency: 0,
+					expected_amount: 0,
+					expected_amount_in_currency: 0,
+				});
+			}
+			payment.expected_amount -= Math.abs(flt(row.base_amount));
+			payment.expected_amount_in_currency -= Math.abs(flt(row.original_amount));
+		});
+	} else if (flt(d.change_amount)) {
+		const currency = d.currency || frm.doc.company_currency;
+		const payment = frm.doc.payment_reconciliation.find(
+			(pay) => pay.mode_of_payment === cash_mode_of_payment && (pay.currency || frm.doc.company_currency) === currency,
+		);
+		if (payment) {
+			payment.expected_amount -= get_base_value(d, "change_amount", "base_change_amount", conversion_rate);
+			payment.expected_amount_in_currency -= flt(d.change_amount);
+		}
+	}
 }
 
 function add_pos_payment_to_payments(p, frm) {
@@ -253,7 +295,7 @@ const get_cash_mode_of_payment = async (frm) => {
 };
 
 const get_conversion_rate = (doc) =>
-	doc.conversion_rate || doc.exchange_rate || doc.target_exchange_rate || doc.plc_conversion_rate || 1;
+	doc.conversion_rate || doc.source_exchange_rate || doc.target_exchange_rate || doc.exchange_rate || 1;
 
 const get_base_value = (doc, field, base_field, conversion_rate) => {
 	const base_fieldname = base_field || `base_${field}`;
@@ -270,9 +312,9 @@ const get_base_value = (doc, field, base_field, conversion_rate) => {
 	if (!conversion_rate) {
 		conversion_rate =
 			doc.conversion_rate ||
-			doc.exchange_rate ||
+			doc.source_exchange_rate ||
 			doc.target_exchange_rate ||
-			doc.plc_conversion_rate ||
+			doc.exchange_rate ||
 			1;
 	}
 

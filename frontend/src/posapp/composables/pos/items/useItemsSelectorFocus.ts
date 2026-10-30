@@ -4,12 +4,14 @@ type FocusDependencies = {
 	getVM?: () => any;
 	scannerInput?: any;
 	itemSelection?: any;
+	focusHighlightedResult?: () => void | Promise<void>;
 };
 
 export const useItemsSelectorFocus = ({
 	getVM,
 	scannerInput,
 	itemSelection,
+	focusHighlightedResult,
 }: FocusDependencies) => {
 	const MAX_FOCUS_RETRIES = 8;
 	const getVm = (): any => (typeof getVM === "function" ? getVM() : null);
@@ -117,7 +119,10 @@ export const useItemsSelectorFocus = ({
 	};
 
 	const scheduleFocusAttempt = (attempt: number) => {
-		if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+		if (
+			typeof window !== "undefined" &&
+			typeof window.requestAnimationFrame === "function"
+		) {
 			window.requestAnimationFrame(() => {
 				focusItemSearch(attempt + 1);
 			});
@@ -234,7 +239,19 @@ export const useItemsSelectorFocus = ({
 	const handleSearchKeydown = (event: KeyboardEvent) => {
 		const vm = getVm();
 		if (!vm || !event) return;
-		if ((itemSelection || vm.itemSelection).handleSearchKeydown(event)) {
+		const selection = itemSelection || vm.itemSelection;
+		if (
+			event.altKey &&
+			!event.ctrlKey &&
+			!event.metaKey &&
+			event.key === "ArrowDown"
+		) {
+			event.preventDefault();
+			selection.activateResultNavigation?.();
+			void Promise.resolve(focusHighlightedResult?.());
+			return;
+		}
+		if (selection.handleSearchKeydown(event)) {
 			return;
 		}
 

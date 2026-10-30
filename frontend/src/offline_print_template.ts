@@ -4,6 +4,7 @@ import {
 	memoryInitPromise,
 } from "./offline/index";
 import nunjucks from "nunjucks";
+import { sanitizePrintHtml } from "./posapp/utils/sanitizePrintHtml";
 
 declare const frappe: any;
 
@@ -28,10 +29,12 @@ function attachFormatter(obj: any) {
 function computePaidAmount(doc: any) {
 	if (!doc) return 0;
 
+	const sign = doc.is_return ? -1 : 1;
 	const paymentsTotal = (doc.payments || []).reduce(
 		(sum: number, p: any) => sum + Math.abs(parseFloat(p.amount) || 0),
 		0,
 	);
+	const changeAmount = Math.abs(parseFloat(doc.change_amount) || 0);
 
 	const creditSale =
 		doc.is_credit_sale === true ||
@@ -43,8 +46,10 @@ function computePaidAmount(doc: any) {
 		return 0;
 	}
 
-	const base = doc.paid_amount ?? doc.grand_total ?? 0;
-	return paymentsTotal || base;
+	const paidAmount = paymentsTotal
+		? Math.max(paymentsTotal - changeAmount, 0)
+		: Math.abs(parseFloat(doc.paid_amount ?? doc.grand_total ?? 0) || 0);
+	return sign * paidAmount;
 }
 
 function defaultOfflineHTML(invoice: any, terms = "") {
@@ -95,6 +100,28 @@ function defaultOfflineHTML(invoice: any, terms = "") {
                 <td style="width:40%; text-align:right;">${invoice.change_amount}</td>
             </tr>`
 		: "";
+	const paymentRows = (invoice.payments || [])
+		.filter(
+			(row: any) =>
+				Number(row?.amount || row?.posa_original_amount || 0) !== 0,
+		)
+		.map((row: any) => {
+			const paymentCurrency =
+				row.posa_payment_currency || invoice.currency || "";
+			const original = row.posa_original_amount ?? row.amount;
+			const equivalent =
+				paymentCurrency !== invoice.currency
+					? ` <small>(${row.amount} ${invoice.currency || ""})</small>`
+					: "";
+			return `<tr><td>${row.mode_of_payment || "Payment"} (${paymentCurrency})</td><td style="text-align:right">${original}${equivalent}</td></tr>`;
+		})
+		.join("");
+	const physicalChangeRows = (invoice.posa_change_returns || [])
+		.map(
+			(row: any) =>
+				`<tr><td>Change (${row.currency || ""})</td><td style="text-align:right">${row.original_amount}</td></tr>`,
+		)
+		.join("");
 
 	const termsSection = terms
 		? `<div class="terms"><strong>Terms & Conditions</strong><div>${terms}</div></div>`
@@ -158,7 +185,9 @@ function defaultOfflineHTML(invoice: any, terms = "") {
                 <td style="width:60%">Paid</td>
                 <td style="width:40%; text-align:right;">${paidAmount}</td>
             </tr>
-            ${changeRow}
+			${changeRow}
+			${paymentRows}
+			${physicalChangeRows}
         </tbody>
     </table>
     ${termsSection}
@@ -189,11 +218,13 @@ export default async function renderOfflineInvoiceHTML(invoice: any) {
 		console.warn(
 			"No offline print template cached; using fallback template",
 		);
-		return defaultOfflineHTML(doc, doc.terms_and_conditions);
+		return sanitizePrintHtml(
+			defaultOfflineHTML(doc, doc.terms_and_conditions),
+		);
 	}
 
 	try {
-		const env = nunjucks.configure({ autoescape: false });
+		const env = nunjucks.configure({ autoescape: true });
 		env.addFilter("format_currency", (value: unknown, currency: string) => {
 			const number =
 				typeof value === "number" ? value : parseFloat(String(value));
@@ -224,9 +255,11 @@ export default async function renderOfflineInvoiceHTML(invoice: any) {
 				get_list: () => [],
 			},
 		};
-		return env.renderString(template, context);
+		return sanitizePrintHtml(env.renderString(template, context));
 	} catch (e) {
 		console.error("Failed to render offline invoice", e);
-		return defaultOfflineHTML(doc, doc.terms_and_conditions);
+		return sanitizePrintHtml(
+			defaultOfflineHTML(doc, doc.terms_and_conditions),
+		);
 	}
 }

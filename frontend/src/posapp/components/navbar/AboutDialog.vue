@@ -78,7 +78,9 @@
 									<v-icon size="18" color="white">mdi-application-outline</v-icon>
 								</div>
 								<div class="app-details-improved">
-									<div class="app-name-improved">{{ app.app_name }}</div>
+									<div class="app-name-improved">
+										{{ getPosAppDisplayName(app.app_name) }}
+									</div>
 									<div class="app-version-improved">v{{ app.installed_version }}</div>
 								</div>
 							</div>
@@ -105,7 +107,8 @@
 
 <script setup>
 import { computed, ref, watch } from "vue";
-import { formatBuildVersion } from "../../stores/updateStore.js";
+import { getPosAppDisplayName } from "../../config/branding";
+import { formatBuildVersion } from "../../stores/updateStore";
 
 defineOptions({
 	name: "AboutDialog",

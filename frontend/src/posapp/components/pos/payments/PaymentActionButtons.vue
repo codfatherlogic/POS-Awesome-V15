@@ -8,13 +8,20 @@
 					size="large"
 					color="primary"
 					variant="flat"
+					prepend-icon="mdi-check-circle-outline"
 					class="payment-submit-btn payment-footer-btn"
+					data-pos-keyboard-target="payment-submit"
+					data-testid="payment-submit"
+					:aria-keyshortcuts="showKeyboardShortcuts ? 'Control+Enter Meta+Enter' : undefined"
 					@click="$emit('submit')"
 					:loading="loading"
 					:disabled="loading || validatePayment"
 					:class="{ 'submit-highlight': highlightSubmit }"
 				>
-					{{ __("Submit") }}
+					<span>{{ __("Submit") }}</span>
+					<kbd v-if="showKeyboardShortcuts" class="payment-footer-btn__shortcut">
+						Ctrl/⌘+Enter
+					</kbd>
 				</v-btn>
 			</v-col>
 			<v-col cols="12" sm="6" class="payment-action-col">
@@ -23,12 +30,21 @@
 					size="large"
 					color="success"
 					variant="flat"
+					prepend-icon="mdi-printer-check"
 					class="payment-submit-print-btn payment-footer-btn"
+					data-pos-keyboard-target="payment-submit-print"
+					data-testid="payment-submit-print"
+					:aria-keyshortcuts="
+						showKeyboardShortcuts ? 'Control+Shift+Enter Meta+Shift+Enter' : undefined
+					"
 					@click="$emit('submit-and-print')"
 					:loading="loading"
 					:disabled="loading || validatePayment"
 				>
-					{{ __("Submit & Print") }}
+					<span>{{ __("Submit & Print") }}</span>
+					<kbd v-if="showKeyboardShortcuts" class="payment-footer-btn__shortcut">
+						Ctrl/⌘+Shift+Enter
+					</kbd>
 				</v-btn>
 			</v-col>
 			<v-col cols="12">
@@ -36,8 +52,11 @@
 					block
 					size="large"
 					color="error"
-					variant="flat"
+					variant="tonal"
+					prepend-icon="mdi-close-circle-outline"
 					class="mt-2 pa-1 payment-cancel-btn payment-footer-btn"
+					data-pos-keyboard-target="payment-cancel"
+					data-testid="payment-cancel"
 					@click="$emit('cancel')"
 				>
 					{{ __("Cancel Payment") }}
@@ -53,6 +72,7 @@ defineProps({
 	validatePayment: Boolean,
 	highlightSubmit: Boolean,
 	compact: Boolean,
+	showKeyboardShortcuts: Boolean,
 });
 
 defineEmits(["submit", "submit-and-print", "cancel"]);
@@ -67,7 +87,7 @@ const __ = window.__;
 
 .compact :deep(.v-btn),
 :deep(.compact .v-btn) {
-	min-height: 42px;
+	min-height: var(--pos-control-height);
 }
 
 .payment-footer-btn {
@@ -77,19 +97,39 @@ const __ = window.__;
 		background-color 0.18s ease,
 		transform 0.18s ease !important;
 	color: #ffffff !important;
-	min-height: 48px !important;
+	min-height: 50px !important;
+	border-radius: var(--pos-radius-sm) !important;
+	font-weight: 700 !important;
+	letter-spacing: 0.01em !important;
+}
+
+.payment-footer-btn__shortcut {
+	margin-inline-start: 8px;
+	padding: 3px 6px;
+	border: 1px solid currentColor;
+	border-bottom-width: 2px;
+	border-radius: 3px;
+	background: rgba(255, 255, 255, 0.12);
+	color: inherit;
+	font: inherit;
+	font-size: 0.68rem;
+	font-weight: 800;
+	line-height: 1;
 }
 
 .payment-submit-btn {
-	background-color: rgb(var(--v-theme-primary)) !important;
+	background-color: var(--pos-action-primary) !important;
 }
 
 .payment-submit-print-btn {
-	background-color: rgb(var(--v-theme-success)) !important;
+	background-color: var(--pos-action-pay) !important;
 }
 
 .payment-cancel-btn {
-	background-color: rgb(var(--v-theme-error)) !important;
+	border: 1px solid color-mix(in srgb, var(--pos-error) 48%, var(--pos-border)) !important;
+	background-color: var(--pos-error-container) !important;
+	color: var(--pos-error) !important;
+	box-shadow: none !important;
 }
 
 .payment-footer-btn:hover,
@@ -104,21 +144,22 @@ const __ = window.__;
 .payment-submit-btn:focus,
 .payment-submit-btn:focus-visible,
 .payment-submit-btn:active {
-	background-color: rgba(var(--v-theme-primary), 0.9) !important;
+	background-color: var(--pos-action-primary-hover) !important;
 }
 
 .payment-submit-print-btn:hover,
 .payment-submit-print-btn:focus,
 .payment-submit-print-btn:focus-visible,
 .payment-submit-print-btn:active {
-	background-color: rgba(var(--v-theme-success), 0.9) !important;
+	background-color: var(--pos-action-pay-hover) !important;
 }
 
 .payment-cancel-btn:hover,
 .payment-cancel-btn:focus,
 .payment-cancel-btn:focus-visible,
 .payment-cancel-btn:active {
-	background-color: rgba(var(--v-theme-error), 0.9) !important;
+	border-color: var(--pos-error) !important;
+	background-color: color-mix(in srgb, var(--pos-error-container) 82%, var(--pos-error)) !important;
 }
 
 .payment-action-col {
@@ -133,6 +174,15 @@ const __ = window.__;
 :deep(.payment-footer-btn .v-btn__underlay) {
 	opacity: 0 !important;
 	background: transparent !important;
+}
+
+:deep(.payment-footer-btn .v-btn__content) {
+	color: #ffffff !important;
+}
+
+:deep(.payment-cancel-btn .v-btn__content),
+:deep(.payment-cancel-btn .v-icon) {
+	color: var(--pos-error) !important;
 }
 
 @media (max-width: 768px) {
@@ -150,7 +200,7 @@ const __ = window.__;
 	}
 
 	:deep(.payment-footer-btn.v-btn) {
-		min-height: 38px !important;
+		min-height: 46px !important;
 	}
 
 	:deep(.payment-footer-btn .v-btn__content) {
@@ -165,7 +215,7 @@ const __ = window.__;
 	}
 
 	:deep(.payment-footer-btn.v-btn) {
-		min-height: 34px !important;
+		min-height: 46px !important;
 	}
 
 	:deep(.payment-footer-btn .v-btn__content) {

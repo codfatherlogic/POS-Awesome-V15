@@ -1,9 +1,29 @@
-import { memory, persist, isOffline } from "./db";
+import { isOffline, memory, persist } from "./db";
 import { syncOfflineCustomers } from "./customers";
-import { updateLocalStock } from "./stock";
 import { reduceCacheUsage } from "./cache";
+import { ensureOfflineInvoiceRequest } from "./idempotency";
+import {
+	enqueueInvoiceOutboxEntry,
+	getInvoiceOutboxMode,
+	syncInvoiceOutboxResource,
+	shouldWriteInvoiceOutbox,
+} from "./invoiceOutbox";
+import { updateLocalStock } from "./stock";
+import {
+	claimRetryableQueueEntries,
+	clearWriteQueueEntries,
+	deleteWriteQueueEntryByIndex,
+	enqueueWriteQueueEntry,
+	getQueuedPayloadCount,
+	getQueuedPayloadSnapshots,
+	markWriteQueueEntryFailed,
+	markWriteQueueEntrySynced,
+	type OfflineEntityType,
+} from "./writeQueue";
 
 type AnyRecord = Record<string, any>;
+
+const INVOICE_ENTITY: OfflineEntityType = "invoice";
 
 const asBoolean = (value: any): boolean => {
 	return (
@@ -16,51 +36,108 @@ const asBoolean = (value: any): boolean => {
 	);
 };
 
-// Flag to avoid concurrent invoice syncs which can cause duplicate submissions
 let invoiceSyncInProgress = false;
 
-// Validate stock for offline invoice
-export function validateStockForOfflineInvoice(items: AnyRecord[]) {
+function shouldValidateOfflineInvoiceStock(invoice: AnyRecord) {
+	if (!invoice || invoice.is_return) {
+		return false;
+	}
+
+	const doctype = String(invoice.doctype || "").trim();
+	if (["Sales Order", "Quotation", "Purchase Order"].includes(doctype)) {
+		return false;
+	}
+
+	if (doctype === "Sales Invoice") {
+		return asBoolean(invoice.update_stock);
+	}
+
+	if (doctype === "POS Invoice") {
+		return true;
+	}
+
+	return true;
+}
+
+export function validateStockForOfflineInvoice(
+	items: AnyRecord[],
+	invoice: AnyRecord = {},
+) {
 	const openingStorage = memory.pos_opening_storage || {};
 	const stockSettings = openingStorage?.stock_settings || {};
 	const posProfile = openingStorage?.pos_profile || {};
 
-	const allowNegativeStock = asBoolean(stockSettings?.allow_negative_stock);
-	if (allowNegativeStock) {
+	if (!shouldValidateOfflineInvoiceStock(invoice)) {
+		return { isValid: true, invalidItems: [], errorMessage: "" };
+	}
+
+	const allowOfflineWithoutStockVerification = asBoolean(
+		posProfile?.posa_allow_offline_sale_without_stock_verification,
+	);
+	if (allowOfflineWithoutStockVerification) {
 		return { isValid: true, invalidItems: [], errorMessage: "" };
 	}
 
 	const blockSaleBeyondAvailableQty = asBoolean(
 		posProfile?.posa_block_sale_beyond_available_qty,
 	);
+	const allowGlobalNegativeStock = asBoolean(
+		stockSettings?.allow_negative_stock,
+	);
 
 	const stockCache = memory.local_stock_cache || {};
 	const invalidItems: AnyRecord[] = [];
+	const requestedByItem = new Map<string, AnyRecord>();
 
 	items.forEach((item) => {
-		if (asBoolean(item?.allow_negative_stock)) {
+		if (!asBoolean(item?.is_stock_item)) {
 			return;
 		}
 
 		const itemCode = item.item_code;
-		const requestedQty = Math.abs(item.qty || 0);
-		const currentStock = stockCache[itemCode]?.actual_qty || 0;
-
-		if (!blockSaleBeyondAvailableQty) {
+		if (!itemCode || Number(item.qty || 0) < 0) {
 			return;
 		}
 
-		if (currentStock - requestedQty < 0) {
+		const itemAllowsNegativeStock = asBoolean(item?.allow_negative_stock);
+		if (
+			!blockSaleBeyondAvailableQty &&
+			(allowGlobalNegativeStock || itemAllowsNegativeStock)
+		) {
+			return;
+		}
+
+		const requestedQty = Math.abs(
+			Number(item.stock_qty ?? item.qty ?? 0) || 0,
+		);
+		const existing = requestedByItem.get(itemCode);
+		if (existing) {
+			existing.requested_qty += requestedQty;
+			return;
+		}
+
+		requestedByItem.set(itemCode, {
+			item_code: itemCode,
+			item_name: item.item_name || itemCode,
+			requested_qty: requestedQty,
+		});
+	});
+
+	requestedByItem.forEach((item) => {
+		const currentStock = Number(
+			stockCache[item.item_code]?.actual_qty || 0,
+		);
+
+		if (currentStock - item.requested_qty < 0) {
 			invalidItems.push({
-				item_code: itemCode,
-				item_name: item.item_name || itemCode,
-				requested_qty: requestedQty,
+				item_code: item.item_code,
+				item_name: item.item_name,
+				requested_qty: item.requested_qty,
 				available_qty: currentStock,
 			});
 		}
 	});
 
-	// Create clean error message
 	let errorMessage = "";
 	if (invalidItems.length === 1) {
 		const item = invalidItems[0];
@@ -73,20 +150,21 @@ export function validateStockForOfflineInvoice(items: AnyRecord[]) {
 			invalidItems
 				.map(
 					(item) =>
-						`• ${item.item_name}: Need ${item.requested_qty}, Have ${item.available_qty}`,
+						`â€¢ ${item.item_name}: Need ${item.requested_qty}, Have ${item.available_qty}`,
 				)
 				.join("\n");
 	}
 
 	return {
 		isValid: invalidItems.length === 0,
-		invalidItems: invalidItems,
-		errorMessage: errorMessage,
+		invalidItems,
+		errorMessage,
 	};
 }
 
-export function saveOfflineInvoice(entry: AnyRecord) {
-	// Validate that invoice has items before saving
+function prepareOfflineInvoiceEntry(entry: AnyRecord) {
+	ensureOfflineInvoiceRequest(entry);
+
 	if (
 		!entry.invoice ||
 		!Array.isArray(entry.invoice.items) ||
@@ -95,71 +173,85 @@ export function saveOfflineInvoice(entry: AnyRecord) {
 		throw new Error("Cart is empty. Add items before saving.");
 	}
 
-	const validation = validateStockForOfflineInvoice(entry.invoice.items);
+	const validation = validateStockForOfflineInvoice(
+		entry.invoice.items,
+		entry.invoice,
+	);
 	if (!validation.isValid) {
 		throw new Error(validation.errorMessage);
 	}
 
-	const key = "offline_invoices";
-	const entries = memory.offline_invoices;
-	// Clone the entry before storing to strip Vue reactivity
-	// and other non-serializable properties. IndexedDB only
-	// supports structured cloneable data, so reactive proxies
-	// cause a DataCloneError without this step.
 	let cleanEntry;
 	try {
 		cleanEntry = JSON.parse(JSON.stringify(entry));
-	} catch (e) {
-		console.error("Failed to serialize offline invoice", e);
-		throw e;
+	} catch (error) {
+		console.error("Failed to serialize offline invoice", error);
+		throw error;
 	}
 
-	entries.push(cleanEntry);
-	memory.offline_invoices = entries;
-	persist(key);
+	const replaySources = Array.isArray(cleanEntry?.data?.customer_credit_dict)
+		? cleanEntry.data.customer_credit_dict.filter(
+				(row: AnyRecord) => Number(row?.credit_to_redeem || 0) > 0,
+			)
+		: [];
 
-	// Update local stock quantities
-	if (entry.invoice && entry.invoice.items) {
+	if (
+		Number(cleanEntry?.data?.redeemed_customer_credit || 0) > 0 &&
+		cleanEntry?.invoice?.customer &&
+		replaySources.length
+	) {
+		cleanEntry.data.customer_balance_replay = {
+			customer: cleanEntry.invoice.customer,
+			redeemed_customer_credit: cleanEntry.data.redeemed_customer_credit,
+			sources: replaySources,
+			timestamp: Date.now(),
+		};
+	}
+
+	return cleanEntry;
+}
+
+export async function saveOfflineInvoice(entry: AnyRecord) {
+	const cleanEntry = prepareOfflineInvoiceEntry(entry);
+	if (shouldWriteInvoiceOutbox()) {
+		await enqueueInvoiceOutboxEntry(cleanEntry);
+	}
+	const createdEntry = await enqueueWriteQueueEntry(
+		INVOICE_ENTITY,
+		cleanEntry,
+	);
+
+	if (
+		entry.invoice?.items &&
+		shouldValidateOfflineInvoiceStock(entry.invoice)
+	) {
 		updateLocalStock(entry.invoice.items);
 	}
+
+	return createdEntry;
 }
 
 export function getOfflineInvoices() {
-	return memory.offline_invoices;
+	return getQueuedPayloadSnapshots(INVOICE_ENTITY);
 }
 
-export function clearOfflineInvoices() {
-	memory.offline_invoices = [];
-	persist("offline_invoices");
+export async function clearOfflineInvoices() {
+	await clearWriteQueueEntries(INVOICE_ENTITY);
 }
 
-export function deleteOfflineInvoice(index: number) {
-	if (
-		Array.isArray(memory.offline_invoices) &&
-		index >= 0 &&
-		index < memory.offline_invoices.length
-	) {
-		memory.offline_invoices.splice(index, 1);
-		persist("offline_invoices");
-	}
+export async function deleteOfflineInvoice(index: number) {
+	await deleteWriteQueueEntryByIndex(INVOICE_ENTITY, index);
 }
 
 export function getPendingOfflineInvoiceCount() {
-	return memory.offline_invoices.length;
+	return getQueuedPayloadCount(INVOICE_ENTITY);
 }
 
-// Reset cached invoices and customers after syncing
-// but preserve the stock cache so offline validation
-// still has access to the last known quantities
 export function resetOfflineState() {
 	memory.offline_invoices = [];
 	memory.offline_customers = [];
 	memory.offline_payments = [];
 	memory.pos_last_sync_totals = { pending: 0, synced: 0, drafted: 0 };
-
-	persist("offline_invoices");
-	persist("offline_customers");
-	persist("offline_payments");
 	persist("pos_last_sync_totals");
 }
 
@@ -176,9 +268,25 @@ export function getLastSyncTotals() {
 	return memory.pos_last_sync_totals || { pending: 0, synced: 0, drafted: 0 };
 }
 
-// Add sync function to clear local cache when invoices are successfully synced
 export async function syncOfflineInvoices() {
-	// Prevent concurrent syncs which can lead to duplicate submissions
+	if (getInvoiceOutboxMode() === "coordinator") {
+		const result = await syncInvoiceOutboxResource(
+			async (method, args = {}) => {
+				const response = await frappe.call({ method, args });
+				return typeof response?.message === "undefined"
+					? response || {}
+					: response.message;
+			},
+		);
+		const totals = {
+			pending: Number((result as AnyRecord).pendingCount || 0),
+			synced: Number((result as AnyRecord).acknowledged || 0),
+			drafted: 0,
+		};
+		setLastSyncTotals(totals);
+		return totals;
+	}
+
 	if (invoiceSyncInProgress) {
 		return {
 			pending: getPendingOfflineInvoiceCount(),
@@ -186,38 +294,50 @@ export async function syncOfflineInvoices() {
 			drafted: 0,
 		};
 	}
+
 	invoiceSyncInProgress = true;
 	try {
-		// Ensure any offline customers are synced first so that invoices
-		// referencing them do not fail during submission
 		await syncOfflineCustomers();
 
 		const invoices = getOfflineInvoices();
 		if (!invoices.length) {
-			// No invoices to sync; clear last totals to avoid repeated messages
 			const totals = { pending: 0, synced: 0, drafted: 0 };
 			setLastSyncTotals(totals);
 			return totals;
 		}
+
 		if (isOffline()) {
-			// When offline just return the pending count without attempting a sync
 			return { pending: invoices.length, synced: 0, drafted: 0 };
 		}
 
-		const failures: AnyRecord[] = [];
+		const claimedEntries = await claimRetryableQueueEntries(INVOICE_ENTITY);
+		if (!claimedEntries.length) {
+			return {
+				pending: getPendingOfflineInvoiceCount(),
+				synced: 0,
+				drafted: 0,
+			};
+		}
+
 		let synced = 0;
 		let drafted = 0;
 
-		for (const inv of invoices) {
+		for (const entry of claimedEntries) {
+			const queuedInvoice = entry.payload;
 			try {
 				await frappe.call({
 					method: "posawesome.posawesome.api.invoices.submit_invoice",
 					args: {
-						invoice: inv.invoice,
-						data: inv.data,
+						invoice: queuedInvoice.invoice,
+						data: queuedInvoice.data,
 					},
 				});
-				synced++;
+				synced += 1;
+				await markWriteQueueEntrySynced(
+					INVOICE_ENTITY,
+					Number(entry.queue_id),
+					entry.last_attempt_at,
+				);
 			} catch (error) {
 				console.error(
 					"Failed to submit invoice, saving as draft",
@@ -226,41 +346,49 @@ export async function syncOfflineInvoices() {
 				try {
 					await frappe.call({
 						method: "posawesome.posawesome.api.invoices.update_invoice",
-						args: { data: inv.invoice },
+						args: { data: queuedInvoice.invoice },
 					});
 					drafted += 1;
-				} catch (draftErr) {
-					console.error("Failed to save invoice as draft", draftErr);
-					failures.push(inv);
+					await markWriteQueueEntrySynced(
+						INVOICE_ENTITY,
+						Number(entry.queue_id),
+						entry.last_attempt_at,
+					);
+				} catch (draftError) {
+					console.error(
+						"Failed to save invoice as draft",
+						draftError,
+					);
+					await markWriteQueueEntryFailed(
+						INVOICE_ENTITY,
+						Number(entry.queue_id),
+						draftError,
+						entry.last_attempt_at,
+					);
 				}
 			}
 		}
 
-		// Reset saved invoices and totals after successful sync
-		if (synced > 0) {
-			resetOfflineState();
+		if (
+			synced > 0 &&
+			drafted === 0 &&
+			getPendingOfflineInvoiceCount() === 0
+		) {
+			reduceCacheUsage();
 		}
 
-		const pendingLeft = failures.length;
+		const totals = {
+			pending: getPendingOfflineInvoiceCount(),
+			synced,
+			drafted,
+		};
 
-		if (pendingLeft) {
-			memory.offline_invoices = failures;
-			persist("offline_invoices");
-		} else {
-			clearOfflineInvoices();
-			if (synced > 0 && drafted === 0) {
-				reduceCacheUsage();
-			}
-		}
-
-		const totals = { pending: pendingLeft, synced, drafted };
-		if (pendingLeft || drafted) {
-			// Persist totals only if there are invoices still pending or drafted
+		if (totals.pending || drafted) {
 			setLastSyncTotals(totals);
 		} else {
-			// Clear totals so success message only shows once
 			setLastSyncTotals({ pending: 0, synced: 0, drafted: 0 });
 		}
+
 		return totals;
 	} finally {
 		invoiceSyncInProgress = false;

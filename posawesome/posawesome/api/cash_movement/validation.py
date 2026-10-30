@@ -129,7 +129,9 @@ def resolve_source_cash_account(payload, profile_doc):
 def resolve_target_account(payload, profile_doc, movement_type):
     movement_type = (movement_type or "").strip()
     if movement_type == "Expense":
-        account = (payload.get("expense_account") or profile_doc.get("posa_default_expense_account") or "").strip()
+        account = (
+            payload.get("expense_account") or profile_doc.get("posa_default_expense_account") or ""
+        ).strip()
         allowed_expense_accounts = extract_allowed_accounts(profile_doc.get("posa_allowed_expense_accounts"))
 
         if not account and allowed_expense_accounts:
@@ -150,9 +152,7 @@ def resolve_target_account(payload, profile_doc, movement_type):
 
         if configured_default:
             if payload_account and payload_account != configured_default:
-                frappe.throw(
-                    _("Back Office Cash Account is fixed by POS Profile and cannot be overridden.")
-                )
+                frappe.throw(_("Back Office Cash Account is fixed by POS Profile and cannot be overridden."))
             account = configured_default
         else:
             account = payload_account

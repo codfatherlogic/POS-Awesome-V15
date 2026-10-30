@@ -1,12 +1,42 @@
+/**
+ * Offline pricing-rule evaluation engine.
+ *
+ * Applies Frappe/ERPNext pricing rules to a single cart item without any network calls.
+ * Used by `usePricingRulesStore` which holds a pre-loaded rule snapshot from IndexedDB.
+ *
+ * The primary entry point is {@link evaluatePricingRules}. Helper functions
+ * ({@link collectCandidates}, {@link ruleSort}, {@link matchParty}, etc.) are exported
+ * for unit testing but are not part of the public API contract — they may change.
+ *
+ * @module lib/pricingEngine
+ */
+
 const DEFAULT_PRECISION = 6;
 
 type AnyRecord = Record<string, any>;
+
+export type PricingRuleIndexBundle = {
+	byItem?: Map<string, AnyRecord[]>;
+	byGroup?: Map<string, AnyRecord[]>;
+	byBrand?: Map<string, AnyRecord[]>;
+	general?: AnyRecord[];
+	preSorted?: boolean;
+};
 
 const parseOptionalFloat = (value: unknown): number | null => {
 	const numeric = Number.parseFloat(String(value));
 	return Number.isFinite(numeric) ? numeric : null;
 };
 
+const resolvePositiveAmount = (value: unknown): number => {
+	const numeric = Number.parseFloat(String(value ?? 0));
+	return Number.isFinite(numeric) ? Math.max(0, Math.abs(numeric)) : 0;
+};
+
+/**
+ * Rounds `value` to `precision` decimal places using symmetric (half-up) rounding.
+ * Non-finite inputs return `0`.
+ */
 export const round = (
 	value: unknown,
 	precision = DEFAULT_PRECISION,
@@ -19,6 +49,11 @@ export const round = (
 	return Math.round(numeric * factor) / factor;
 };
 
+/**
+ * Returns `true` when `currentDate` falls within the `[start, end]` range.
+ * A missing `start` or `end` is treated as unbounded. A missing or unparseable
+ * `currentDate` returns `true` (permissive — the rule is not excluded on date grounds).
+ */
 export const inDateRange = (
 	currentDate: string | Date | null | undefined,
 	start: string | Date | null | undefined,
@@ -49,6 +84,11 @@ export const inDateRange = (
 	return true;
 };
 
+/**
+ * Returns `true` when the pricing rule's customer/group/territory restrictions are
+ * satisfied by the current invoice context.
+ * A rule with no restrictions on a dimension always passes that dimension's check.
+ */
 export const matchParty = (
 	rule: AnyRecord,
 	customer: string | null | undefined,
@@ -100,6 +140,12 @@ export const matchPriceListAndCurrency = (
 	return true;
 };
 
+export const matchUom = (rule: AnyRecord, item: AnyRecord): boolean => {
+	const ruleUom = String(rule?.uom || "").trim();
+	if (!ruleUom) return true;
+	return ruleUom === String(item?.uom || "").trim();
+};
+
 const pushUnique = (
 	bucket: AnyRecord[],
 	rule: AnyRecord | null | undefined,
@@ -116,14 +162,18 @@ const pushUnique = (
 	seen.add(ruleKey);
 };
 
+/**
+ * Collects all pricing-rule candidates applicable to `item` from the pre-built index.
+ *
+ * Candidates are de-duplicated by rule name. The order is: item-specific → group → brand → general.
+ * Callers must then filter by date, party, currency, and quantity thresholds.
+ *
+ * @param item - The cart item to match against.
+ * @param indexBundle - Pre-built lookup maps produced by `usePricingRulesStore`.
+ */
 export const collectCandidates = (
 	item: AnyRecord = {},
-	indexBundle: {
-		byItem?: Map<string, AnyRecord[]>;
-		byGroup?: Map<string, AnyRecord[]>;
-		byBrand?: Map<string, AnyRecord[]>;
-		general?: AnyRecord[];
-	} = {},
+	indexBundle: PricingRuleIndexBundle = {},
 ): AnyRecord[] => {
 	const { byItem, byGroup, byBrand, general } = indexBundle;
 	const bucket: AnyRecord[] = [];
@@ -317,6 +367,36 @@ const computeThresholdInfo = (rule: AnyRecord, qty: number) => {
 	return { minimum, multiplier };
 };
 
+const amountWithinThreshold = (
+	rule: AnyRecord,
+	lineAmount: number,
+	transactionAmount: number,
+): boolean => {
+	const minAmount =
+		parseOptionalFloat(rule.min_amt) ??
+		parseOptionalFloat(rule.min_amount) ??
+		0;
+	const maxAmount =
+		parseOptionalFloat(rule.max_amt) ??
+		parseOptionalFloat(rule.max_amount);
+
+	if (!minAmount && (maxAmount === null || maxAmount <= 0)) {
+		return true;
+	}
+
+	const applyOn = String(rule.apply_on || "").toLowerCase();
+	const amount =
+		applyOn === "transaction" ? transactionAmount : lineAmount;
+
+	if (minAmount > 0 && amount < minAmount) {
+		return false;
+	}
+	if (maxAmount !== null && maxAmount > 0 && amount > maxAmount) {
+		return false;
+	}
+	return true;
+};
+
 const applyFreeItemRule = (
 	rule: AnyRecord,
 	item: AnyRecord,
@@ -432,26 +512,45 @@ const applyFreeItemRule = (
 	};
 };
 
-// Unified function to evaluate both pricing and free items in a single pass
+/**
+ * Evaluates all applicable pricing rules for a single cart item in one pass.
+ *
+ * Returns two independent results:
+ * - `pricing` — the final rate and accumulated discount after applying non-free-item rules.
+ * - `freebies` — zero or more free-item records to be added to the invoice by the caller.
+ *
+ * Rules are applied in priority order determined by {@link ruleSort}. A rule with
+ * `stop_further_rules` halts pricing-rule processing; `apply_multiple_pricing_rules`
+ * controls whether subsequent rules are also applied.
+ *
+ * Input fields (all part of the single destructured argument):
+ * - `item` — cart item to evaluate; must have `item_code`, `item_group`, and `brand`.
+ * - `qty` — line quantity (UOM-adjusted). Defaults to `item.qty`.
+ * - `docQty` — document-level quantity used for threshold checks.
+ * - `baseRate` — starting rate before discounts. Defaults to `item.base_price_list_rate`.
+ * - `ctx` — evaluation context: date, customer, customer_group, territory, price_list, currency.
+ * - `indexes` — pre-built rule index from `usePricingRulesStore.buildIndexes()`.
+ */
 export const evaluatePricingRules = ({
 	item,
 	qty,
 	docQty,
+	docAmount,
+	cartAmount,
 	baseRate,
 	ctx,
 	indexes,
+	evaluationScope = "line",
 }: {
 	item: AnyRecord;
 	qty?: number | string;
 	docQty?: number | string;
+	docAmount?: number | string;
+	cartAmount?: number | string;
 	baseRate?: number;
 	ctx?: AnyRecord;
-	indexes?: {
-		byItem?: Map<string, AnyRecord[]>;
-		byGroup?: Map<string, AnyRecord[]>;
-		byBrand?: Map<string, AnyRecord[]>;
-		general?: AnyRecord[];
-	};
+	indexes?: PricingRuleIndexBundle;
+	evaluationScope?: "line" | "transaction";
 }): {
 	pricing: {
 		rate: number;
@@ -497,50 +596,79 @@ export const evaluatePricingRules = ({
 						0,
 				);
 	const startRate = Number.isFinite(effectiveBase) ? effectiveBase : 0;
+	const lineAmount =
+		docAmount !== undefined
+			? resolvePositiveAmount(docAmount)
+			: resolvePositiveAmount(startRate * absoluteDocQty);
+	const transactionAmount =
+		cartAmount !== undefined ? resolvePositiveAmount(cartAmount) : lineAmount;
 
 	// Optimization: collect candidates once
-	const candidates = collectCandidates(item, indexes);
+	const candidates = collectCandidates(item, indexes).filter((rule) => {
+		const isTransaction =
+			String(rule?.apply_on || "").toLowerCase() === "transaction";
+		return (
+			(evaluationScope === "transaction" ? isTransaction : !isTransaction) &&
+			matchUom(rule, item)
+		);
+	});
 
-	// Shared filters
-	const validCandidates = candidates
-		.filter((rule) =>
-			inDateRange(ctx?.date, rule.valid_from, rule.valid_upto),
-		)
-		.filter((rule) =>
-			matchParty(
+	const pricingRules: AnyRecord[] = [];
+	const freeRules: AnyRecord[] = [];
+
+	for (const rule of candidates) {
+		if (!inDateRange(ctx?.date, rule.valid_from, rule.valid_upto)) {
+			continue;
+		}
+		if (
+			!matchParty(
 				rule,
 				ctx?.customer,
 				ctx?.customer_group,
 				ctx?.territory,
-			),
-		)
-		.filter((rule) =>
-			matchPriceListAndCurrency(rule, ctx?.price_list, ctx?.currency),
-		);
+			)
+		) {
+			continue;
+		}
+		if (!matchPriceListAndCurrency(rule, ctx?.price_list, ctx?.currency)) {
+			continue;
+		}
+		if (!amountWithinThreshold(rule, lineAmount, transactionAmount)) {
+			continue;
+		}
 
-	// Pricing logic
-	const pricingRules = validCandidates
-		.filter((rule) => !isFreeRule(rule))
-		.filter((rule) => {
-			const minimum = Number.parseFloat(rule.min_qty || 0);
-			return effectiveQty >= minimum;
-		})
-		// Fix: Do not apply "Discount on Other Item" rules to the trigger item.
-		// If same_item is false (0), the rule targets another item, so we shouldn't
-		// apply the price discount to the current item (which matched the 'Apply On' criteria).
-		// We use loose equality check (!!rule.same_item) because it could be 1, true, or "1".
-		// ERPNext defaults same_item to 0 if unchecked.
-		.filter((rule) => {
-			// Fix: Do not apply "Discount on Other Item" rules to the trigger item.
-			// If same_item is false (0), the rule targets another item, so we shouldn't
-			// apply the price discount to the current item (which matched the 'Apply On' criteria).
-			// We use loose equality check (!!rule.same_item) because it could be 1, true, or "1".
+		if (isFreeRule(rule)) {
+			const minimum =
+				Number.parseFloat(rule.min_qty || rule.recurse_for || 1) || 1;
+			const maximum = parseOptionalFloat(rule.max_qty);
+			if (
+				effectiveQty >= minimum &&
+				(maximum === null || maximum <= 0 || effectiveQty <= maximum)
+			) {
+				freeRules.push(rule);
+			}
+			continue;
+		}
 
-			// Simplified logic: Keep rule if same_item is true OR if "Apply On Other" is not set.
-			// ERPNext treats blank "Apply On Other" as "Apply on Self" even if same_item is 0.
-			return !!rule.same_item || !rule.apply_rule_on_other;
-		})
-		.sort(ruleSort);
+		const minimum = Number.parseFloat(rule.min_qty || 0);
+		const maximum = parseOptionalFloat(rule.max_qty);
+		if (
+			effectiveQty < minimum ||
+			(maximum !== null && maximum > 0 && effectiveQty > maximum)
+		) {
+			continue;
+		}
+
+		// Blank "Apply On Other" behaves as "Apply on Self" even if same_item is 0.
+		if (!!rule.same_item || !rule.apply_rule_on_other) {
+			pricingRules.push(rule);
+		}
+	}
+
+	if (!indexes?.preSorted) {
+		pricingRules.sort(ruleSort);
+		freeRules.sort(ruleSort);
+	}
 
 	let pricing: {
 		rate: number;
@@ -557,7 +685,7 @@ export const evaluatePricingRules = ({
 		let rate = startRate;
 
 		for (const rule of pricingRules) {
-			const { newRate, discount, detail } = applyOneRule(
+			const { newRate, detail } = applyOneRule(
 				rate,
 				rule,
 				effectiveQty,
@@ -582,16 +710,6 @@ export const evaluatePricingRules = ({
 		};
 	}
 
-	// Free items logic
-	const freeRules = validCandidates
-		.filter((rule) => isFreeRule(rule))
-		.filter((rule) => {
-			const minimum =
-				Number.parseFloat(rule.min_qty || rule.recurse_for || 1) || 1;
-			return effectiveQty >= minimum;
-		})
-		.sort(ruleSort);
-
 	const freebies: AnyRecord[] = [];
 
 	if (freeRules.length) {
@@ -610,19 +728,52 @@ export const evaluatePricingRules = ({
 	return { pricing, freebies };
 };
 
+/**
+ * Evaluates rules whose ERPNext scope is the whole transaction exactly once.
+ * Transaction rules are header-level rules: their quantity and amount thresholds
+ * use cart totals and a fixed discount amount must not be repeated per item/qty.
+ */
+export const evaluateTransactionPricingRules = ({
+	cartAmount,
+	cartQty,
+	ctx,
+	indexes,
+}: {
+	cartAmount?: number | string;
+	cartQty?: number | string;
+	ctx?: AnyRecord;
+	indexes?: PricingRuleIndexBundle;
+}) => {
+	const transactionRules = (indexes?.general || []).filter(
+		(rule) => String(rule?.apply_on || "").toLowerCase() === "transaction",
+	);
+
+	return evaluatePricingRules({
+		item: {},
+		qty: cartQty,
+		docQty: cartQty,
+		docAmount: cartAmount,
+		cartAmount,
+		baseRate: resolvePositiveAmount(cartAmount),
+		ctx,
+		indexes: {
+			general: transactionRules,
+			preSorted: indexes?.preSorted,
+		},
+		evaluationScope: "transaction",
+	});
+};
+
 // Deprecated: Wrappers for backward compatibility
 export const applyLocalPricingRules = (params: {
 	item: AnyRecord;
 	qty?: number | string;
 	docQty?: number | string;
+	docAmount?: number | string;
+	cartAmount?: number | string;
 	baseRate?: number;
 	ctx?: AnyRecord;
-	indexes?: {
-		byItem?: Map<string, AnyRecord[]>;
-		byGroup?: Map<string, AnyRecord[]>;
-		byBrand?: Map<string, AnyRecord[]>;
-		general?: AnyRecord[];
-	};
+	indexes?: PricingRuleIndexBundle;
 }) => {
 	const { pricing } = evaluatePricingRules(params);
 	return pricing;
@@ -632,6 +783,8 @@ export const computeFreeItems = (params: {
 	item: AnyRecord;
 	qty?: number | string;
 	docQty?: number | string;
+	docAmount?: number | string;
+	cartAmount?: number | string;
 	baseRate?: number;
 	ctx?: AnyRecord;
 	indexes?: {

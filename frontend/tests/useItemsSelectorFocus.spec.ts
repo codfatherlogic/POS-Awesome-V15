@@ -92,6 +92,33 @@ describe("useItemsSelectorFocus", () => {
 		expect(vm._focusSpy).not.toHaveBeenCalled();
 	});
 
+	it("moves Alt+Down into the active result through the shared selection path", async () => {
+		const vm = createVm();
+		const activateResultNavigation = vi.fn();
+		const focusHighlightedResult = vi.fn();
+		const focusApi = useItemsSelectorFocus({
+			getVM: () => vm,
+			scannerInput: {},
+			itemSelection: {
+				activateResultNavigation,
+				handleSearchKeydown: vi.fn(() => false),
+			},
+			focusHighlightedResult,
+		});
+		const event = new KeyboardEvent("keydown", {
+			key: "ArrowDown",
+			altKey: true,
+			cancelable: true,
+		});
+
+		focusApi.handleSearchKeydown(event);
+		await Promise.resolve();
+
+		expect(event.defaultPrevented).toBe(true);
+		expect(activateResultNavigation).toHaveBeenCalledTimes(1);
+		expect(focusHighlightedResult).toHaveBeenCalledTimes(1);
+	});
+
 	it("starts the camera scanner through the component ref", () => {
 		const startScanning = vi.fn();
 		const vm = createVm({
@@ -135,10 +162,12 @@ describe("useItemsSelectorFocus", () => {
 		let trapReleased = false;
 
 		trappedButton.focus();
-		const trappedBlurSpy = vi.spyOn(trappedButton, "blur").mockImplementation(() => {
-			trapReleased = true;
-			HTMLElement.prototype.blur.call(trappedButton);
-		});
+		const trappedBlurSpy = vi
+			.spyOn(trappedButton, "blur")
+			.mockImplementation(() => {
+				trapReleased = true;
+				HTMLElement.prototype.blur.call(trappedButton);
+			});
 		vi.spyOn(searchInput, "focus").mockImplementation(() => {
 			if (trapReleased) {
 				nativeSearchFocus();

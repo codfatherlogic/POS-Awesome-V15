@@ -4,7 +4,7 @@
 import frappe, requests
 from frappe.model.document import Document
 from frappe.utils import get_request_site_address
-from posawesome.posawesome.api.m_pesa import get_token
+from posawesome.posawesome.api.m_pesa import build_mpesa_callback_urls, get_token
 
 
 class MpesaC2BRegisterURL(Document):
@@ -20,14 +20,18 @@ class MpesaC2BRegisterURL(Document):
             base_url = sandbox_url
         else:
             base_url = live_url
+        callback_secret = self.get_password("callback_secret", raise_exception=False)
+        if not callback_secret:
+            frappe.throw("M-Pesa Callback Secret is required before registering URLs.")
         token = get_token(
             app_key=mpesa_settings.consumer_key,
             app_secret=mpesa_settings.get_password("consumer_secret"),
             base_url=base_url,
         )
         site_url = get_request_site_address(True)
-        validation_url = site_url + "/api/method/posawesome.posawesome.api.m_pesa.validation"
-        confirmation_url = site_url + "/api/method/posawesome.posawesome.api.m_pesa.confirmation"
+        callback_urls = build_mpesa_callback_urls(site_url, callback_secret)
+        validation_url = callback_urls["validation_url"]
+        confirmation_url = callback_urls["confirmation_url"]
         register_url = base_url + "/mpesa/c2b/v2/registerurl"
 
         payload = {

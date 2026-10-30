@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import type { POSProfile } from "../../../../types/models";
 // @ts-ignore
-import { getStoredItemsCount } from "../../../../../offline/index";
+import { getStoredItemsCountByScope } from "../../../../../offline/index";
 
 const DEFAULT_PAGE_SIZE = 200;
 const LARGE_CATALOG_THRESHOLD = 5000;
@@ -89,6 +89,7 @@ export function useItemsPagination() {
 		posProfile: POSProfile | null,
 		shouldUseIndexedSearch: boolean,
 		limitSearchEnabled: boolean,
+		storageScope = "",
 	) => {
 		if (!shouldUseIndexedSearch) {
 			cachedPagination.value.enabled = false;
@@ -98,7 +99,9 @@ export function useItemsPagination() {
 		}
 
 		try {
-			const storedCount = await getStoredItemsCount().catch(() => 0);
+			const storedCount = await getStoredItemsCountByScope(
+				storageScope,
+			).catch(() => 0);
 			const resolvedCount = Number.isFinite(storedCount)
 				? storedCount
 				: 0;

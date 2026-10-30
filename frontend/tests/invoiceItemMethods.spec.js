@@ -13,6 +13,10 @@ vi.mock("../src/lib/pricingEngine.ts", () => ({
 		pricing: { rate: 110, discountPerUnit: -10, applied: [] },
 		freebies: [],
 	})),
+	evaluateTransactionPricingRules: vi.fn(() => ({
+		pricing: { rate: 0, discountPerUnit: 0, applied: [] },
+		freebies: [],
+	})),
 }));
 
 import invoiceItemMethods from "../src/posapp/components/pos/invoice/invoiceItemMethods.ts";
@@ -110,7 +114,12 @@ afterEach(() => {
 
 describe("invoiceItemMethods._applyItemDetailPayload", () => {
 	it("applies server discount percentage to item pricing", () => {
-		const context = createContext();
+		const context = {
+			...createContext(),
+			invoiceStore: {
+				recalculateTotals: vi.fn(),
+			},
+		};
 		const item = {
 			item_code: "ITEM-1",
 			qty: 1,
@@ -163,6 +172,7 @@ describe("invoiceItemMethods._applyItemDetailPayload", () => {
 		expect(item.rate).toBeCloseTo(90);
 		expect(item.base_rate).toBeCloseTo(90);
 		expect(item.amount).toBeCloseTo(90);
+		expect(context.invoiceStore.recalculateTotals).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not override existing discount amounts", () => {
@@ -220,6 +230,81 @@ describe("invoiceItemMethods._applyItemDetailPayload", () => {
 	});
 });
 
+describe("invoiceItemMethods UOM row identity", () => {
+	it("does not apply a dozen-row override to a unit row of the same item", () => {
+		const context = createContext();
+		const override = {
+			keys: {
+				name: "ITEM-1",
+				posa_row_id: "ROW-DOZEN",
+				item_code: "ITEM-1",
+				uom: "Dozen",
+				conversion_factor: 12,
+			},
+		};
+		const unitRow = {
+			name: "ITEM-1",
+			posa_row_id: "ROW-UNIT",
+			item_code: "ITEM-1",
+			uom: "Unit",
+			conversion_factor: 1,
+		};
+
+		expect(
+			invoiceItemMethods._doesManualOverrideMatchItem.call(
+				context,
+				override,
+				unitRow,
+			),
+		).toBe(false);
+	});
+
+	it("restores separate UOM values for duplicate item rows", () => {
+		const context = createContext();
+		const rows = [
+			{
+				name: "ITEM-1",
+				posa_row_id: "ROW-DOZEN",
+				item_code: "ITEM-1",
+				uom: "Dozen",
+				conversion_factor: 12,
+				rate: 120,
+			},
+			{
+				name: "ITEM-1",
+				posa_row_id: "ROW-UNIT",
+				item_code: "ITEM-1",
+				uom: "Unit",
+				conversion_factor: 1,
+				rate: 10,
+			},
+		];
+		const snapshots =
+			invoiceItemMethods._snapshotManualValuesFromDocItems.call(
+				context,
+				rows,
+			);
+		const reloadedRows = [
+			{ ...rows[0], uom: "Unit", conversion_factor: 1 },
+			{ ...rows[1], uom: "Dozen", conversion_factor: 12 },
+		];
+
+		invoiceItemMethods._restoreManualSnapshots.call(
+			context,
+			reloadedRows,
+			snapshots,
+		);
+
+		expect(reloadedRows.map((row) => row.uom)).toEqual([
+			"Dozen",
+			"Unit",
+		]);
+		expect(
+			reloadedRows.map((row) => row.conversion_factor),
+		).toEqual([12, 1]);
+	});
+});
+
 describe("invoiceItemMethods.get_invoice_doc currency conversions", () => {
 	it("uses conversion_rate for base totals when PLC=SC != CC", () => {
 		const context = createInvoiceContext({
@@ -254,6 +339,27 @@ describe("invoiceItemMethods.get_invoice_doc currency conversions", () => {
 		expect(doc.plc_conversion_rate).toBeCloseTo(0.88);
 		expect(doc.base_total).toBeCloseTo(220);
 		expect(doc.base_grand_total).toBeCloseTo(220);
+	});
+
+	it("keeps base totals negative for multi-currency returns", () => {
+		const context = createInvoiceContext({
+			price_list_currency: "USD",
+			selected_currency: "USD",
+			exchange_rate: 1,
+			conversion_rate: 1.5,
+			Total: 100,
+			subtotal: 100,
+			invoiceType: "Return",
+			isReturnInvoice: true,
+			invoice_doc: { return_against: "ACC-SINV-0001" },
+		});
+
+		const doc = invoiceItemMethods.get_invoice_doc.call(context);
+
+		expect(doc.grand_total).toBeCloseTo(-100);
+		expect(doc.base_grand_total).toBeCloseTo(-150);
+		expect(doc.rounded_total).toBeCloseTo(-100);
+		expect(doc.base_rounded_total).toBeCloseTo(-150);
 	});
 });
 
@@ -358,9 +464,251 @@ describe("invoiceItemMethods._syncAutoFreeLines", () => {
 		expect(freeLine.base_amount).toBeCloseTo(25);
 		expect(freeLine.is_free_item).toBe(1);
 	});
+
+	it("reuses an existing reward line when server and local keys differ only by parent row", () => {
+		const existingFreeLine = {
+			item_code: "FREE-ITEM",
+			qty: 1,
+			posa_row_id: "FREE-1",
+			is_free_item: 1,
+			auto_free_source: "RULE-1::FREE-ITEM",
+			source_rule: "RULE-1",
+		};
+		const context = {
+			...createContext(),
+			items: [
+				{
+					item_code: "ITEM-BASE",
+					qty: 2,
+					posa_row_id: "ROW-PARENT",
+				},
+				existingFreeLine,
+			],
+			calc_stock_qty: vi.fn(),
+			remove_item: vi.fn(),
+		};
+		context._getItemsStore = () => ({ getItemByCode: vi.fn(() => null) });
+		context._fromBaseCurrency = (value) => value;
+
+		const freebiesMap = new Map();
+		freebiesMap.set("RULE-1::FREE-ITEM::ROW-PARENT", {
+			rule: "RULE-1",
+			item_code: "FREE-ITEM",
+			qty: 1,
+			parentRowId: "ROW-PARENT",
+			rate: 0,
+			base_rate: 0,
+		});
+
+		invoiceItemMethods._syncAutoFreeLines.call(context, freebiesMap);
+
+		const freeLines = context.items.filter((line) => line?.is_free_item);
+		expect(freeLines).toHaveLength(1);
+		expect(freeLines[0]).toBe(existingFreeLine);
+		expect(existingFreeLine.auto_free_source).toBe(
+			"RULE-1::FREE-ITEM::ROW-PARENT",
+		);
+		expect(context.remove_item).not.toHaveBeenCalled();
+	});
+
+	it("does not reuse the same fallback reward line for multiple parent rows", () => {
+		const existingFreeLine = {
+			item_code: "FREE-ITEM",
+			qty: 1,
+			posa_row_id: "FREE-1",
+			is_free_item: 1,
+			auto_free_source: "RULE-1::FREE-ITEM",
+			source_rule: "RULE-1",
+		};
+		const context = {
+			...createContext(),
+			items: [
+				{
+					item_code: "ITEM-BASE",
+					qty: 2,
+					posa_row_id: "ROW-PARENT-1",
+				},
+				existingFreeLine,
+				{
+					item_code: "ITEM-BASE",
+					qty: 2,
+					posa_row_id: "ROW-PARENT-2",
+				},
+			],
+			calc_stock_qty: vi.fn(),
+			remove_item: vi.fn(),
+		};
+		context._getItemsStore = () => ({ getItemByCode: vi.fn(() => null) });
+		context._fromBaseCurrency = (value) => value;
+
+		let counter = 1;
+		context.get_new_item = (template) => ({
+			posa_row_id: `FREE-${++counter}`,
+			...template,
+		});
+
+		const freebiesMap = new Map();
+		freebiesMap.set("RULE-1::FREE-ITEM::ROW-PARENT-1", {
+			rule: "RULE-1",
+			item_code: "FREE-ITEM",
+			qty: 1,
+			parentRowId: "ROW-PARENT-1",
+			rate: 0,
+			base_rate: 0,
+		});
+		freebiesMap.set("RULE-1::FREE-ITEM::ROW-PARENT-2", {
+			rule: "RULE-1",
+			item_code: "FREE-ITEM",
+			qty: 1,
+			parentRowId: "ROW-PARENT-2",
+			rate: 0,
+			base_rate: 0,
+		});
+
+		invoiceItemMethods._syncAutoFreeLines.call(context, freebiesMap);
+
+		const freeLines = context.items.filter((line) => line?.is_free_item);
+		expect(freeLines).toHaveLength(2);
+		expect(new Set(freeLines.map((line) => line.posa_row_id)).size).toBe(2);
+		expect(freeLines.map((line) => line.auto_free_source).sort()).toEqual([
+			"RULE-1::FREE-ITEM::ROW-PARENT-1",
+			"RULE-1::FREE-ITEM::ROW-PARENT-2",
+		]);
+		expect(existingFreeLine.auto_free_source).toBe(
+			"RULE-1::FREE-ITEM::ROW-PARENT-1",
+		);
+		expect(context.remove_item).not.toHaveBeenCalled();
+	});
+
+	it("does not reuse a legacy-matched reward line through later base-key fallback", () => {
+		const legacyFreeLine = {
+			item_code: "FREE-ITEM",
+			qty: 1,
+			posa_row_id: "FREE-LEGACY",
+			is_free_item: 1,
+			source_rule: "RULE-1",
+		};
+		const context = {
+			...createContext(),
+			items: [
+				{
+					item_code: "ITEM-BASE",
+					qty: 2,
+					posa_row_id: "ROW-PARENT-1",
+				},
+				legacyFreeLine,
+				{
+					item_code: "ITEM-BASE",
+					qty: 2,
+					posa_row_id: "ROW-PARENT-2",
+				},
+			],
+			calc_stock_qty: vi.fn(),
+			remove_item: vi.fn(),
+		};
+		context._getItemsStore = () => ({ getItemByCode: vi.fn(() => null) });
+		context._fromBaseCurrency = (value) => value;
+
+		let counter = 0;
+		context.get_new_item = (template) => ({
+			posa_row_id: `FREE-NEW-${++counter}`,
+			...template,
+		});
+
+		const freebiesMap = new Map();
+		freebiesMap.set("RULE-1::FREE-ITEM::ROW-PARENT-1", {
+			rule: "RULE-1",
+			item_code: "FREE-ITEM",
+			qty: 1,
+			parentRowId: "ROW-PARENT-1",
+			rate: 0,
+			base_rate: 0,
+		});
+		freebiesMap.set("RULE-1::FREE-ITEM::ROW-PARENT-2", {
+			rule: "RULE-1",
+			item_code: "FREE-ITEM",
+			qty: 1,
+			parentRowId: "ROW-PARENT-2",
+			rate: 0,
+			base_rate: 0,
+		});
+
+		invoiceItemMethods._syncAutoFreeLines.call(context, freebiesMap);
+
+		const freeLines = context.items.filter((line) => line?.is_free_item);
+		expect(freeLines).toHaveLength(2);
+		expect(legacyFreeLine.auto_free_source).toBe(
+			"RULE-1::FREE-ITEM::ROW-PARENT-1",
+		);
+		expect(freeLines.map((line) => line.auto_free_source).sort()).toEqual([
+			"RULE-1::FREE-ITEM::ROW-PARENT-1",
+			"RULE-1::FREE-ITEM::ROW-PARENT-2",
+		]);
+		expect(context.remove_item).not.toHaveBeenCalled();
+	});
 });
 
 describe("invoiceItemMethods._applyServerPricingRules", () => {
+	it("derives the discounted rate when a percentage-only server result keeps the full rate", async () => {
+		const item = {
+			posa_row_id: "ROW-PERCENTAGE",
+			item_code: "ITEM-PERCENTAGE",
+			qty: 5,
+			rate: 100,
+			base_rate: 100,
+			price_list_rate: 100,
+			base_price_list_rate: 100,
+			discount_amount: 0,
+			base_discount_amount: 0,
+			discount_percentage: 0,
+			locked_price: 0,
+		};
+
+		const context = {
+			...createContext(),
+			items: [item],
+			_syncAutoFreeLines: vi.fn(),
+			_updatePricingBadge: vi.fn(),
+			invoiceStore: { recalculateTotals: vi.fn() },
+			$forceUpdate: vi.fn(),
+		};
+		context._fromBaseCurrency = invoiceItemMethods._fromBaseCurrency;
+		context._toBaseCurrency = invoiceItemMethods._toBaseCurrency;
+		context._resolvePricingQty = invoiceItemMethods._resolvePricingQty;
+
+		global.frappe = {
+			call: vi.fn(async () => ({
+				message: {
+					updates: [
+						{
+							row_id: item.posa_row_id,
+							base_rate: 100,
+							base_price_list_rate: 100,
+							base_discount_amount: 0,
+							discount_percentage: 10,
+							pricing_rules: ["RULE-QTY-5"],
+						},
+					],
+					free_lines: [],
+				},
+			})),
+		};
+
+		await invoiceItemMethods._applyServerPricingRules.call(context, {
+			company: "Test Co",
+			price_list: "Standard",
+			currency: "USD",
+		});
+
+		expect(item.rate).toBeCloseTo(90);
+		expect(item.base_rate).toBeCloseTo(90);
+		expect(item.discount_amount).toBeCloseTo(10);
+		expect(item.base_discount_amount).toBeCloseTo(10);
+		expect(item.discount_percentage).toBeCloseTo(10);
+
+		delete global.frappe;
+	});
+
 	it("does not override manual rate overrides from server responses", async () => {
 		const manualItem = {
 			posa_row_id: "ROW-1",
@@ -382,6 +730,9 @@ describe("invoiceItemMethods._applyServerPricingRules", () => {
 			items: [manualItem],
 			_syncAutoFreeLines: vi.fn(),
 			_updatePricingBadge: vi.fn(),
+			invoiceStore: {
+				recalculateTotals: vi.fn(),
+			},
 			$forceUpdate: vi.fn(),
 		};
 		context._fromBaseCurrency = invoiceItemMethods._fromBaseCurrency;
@@ -419,6 +770,7 @@ describe("invoiceItemMethods._applyServerPricingRules", () => {
 		expect(manualItem.discount_amount).toBeCloseTo(60);
 		expect(manualItem.base_discount_amount).toBeCloseTo(60);
 		expect(manualItem.discount_percentage).toBeCloseTo(40);
+		expect(context.invoiceStore.recalculateTotals).toHaveBeenCalledTimes(1);
 
 		delete global.frappe;
 	});
@@ -631,6 +983,75 @@ describe("invoiceItemMethods._applyServerPricingRules", () => {
 		const freebiesArg = context._syncAutoFreeLines.mock.calls[0][0];
 		const serverEntries = Array.from(freebiesArg.values());
 		expect(serverEntries[0].same_item).toBe(1);
+
+		delete global.frappe;
+	});
+});
+
+describe("invoiceItemMethods.applyPricingRulesForCart", () => {
+	it("still applies rules while preserving manual rates when the profile sends ignore_pricing_rule", async () => {
+		const rulePricedItem = {
+			posa_row_id: "ROW-IGNORED",
+			item_code: "ITEM-IGNORED",
+			qty: 25,
+			stock_qty: 25,
+			rate: 120,
+			base_rate: 120,
+			price_list_rate: 120,
+			base_price_list_rate: 120,
+			discount_amount: 0,
+			base_discount_amount: 0,
+			discount_percentage: 0,
+		};
+		const manualItem = {
+			...rulePricedItem,
+			posa_row_id: "ROW-MANUAL",
+			item_code: "ITEM-MANUAL",
+			rate: 75,
+			base_rate: 75,
+			_manual_rate_set: true,
+		};
+		const uomPricedItem = {
+			...rulePricedItem,
+			posa_row_id: "ROW-UOM",
+			item_code: "ITEM-UOM",
+			uom: "Dozen",
+			conversion_factor: 12,
+			stock_qty: 300,
+			rate: 960,
+			base_rate: 960,
+			price_list_rate: 960,
+			base_price_list_rate: 960,
+			_manual_rate_set: true,
+			_manual_rate_set_from_uom: true,
+		};
+		const context = {
+			...createContext(),
+			pos_profile: { ignore_pricing_rule: "1" },
+			items: [rulePricedItem, manualItem, uomPricedItem],
+			_pricingRulesStore: {
+				ensureActiveRules: vi.fn(),
+				getIndexes: vi.fn(() => ({})),
+			},
+			_getPricingContext: vi.fn(() => ({})),
+			_toBaseCurrency: (value) => Number(value),
+			_syncAutoFreeLines: vi.fn(),
+			invoiceStore: { recalculateTotals: vi.fn() },
+		};
+		context._fromBaseCurrency = (value) => Number(value);
+
+		global.frappe = { call: vi.fn() };
+
+		await invoiceItemMethods.applyPricingRulesForCart.call(context);
+
+		expect(global.frappe.call).not.toHaveBeenCalled();
+		expect(rulePricedItem.rate).toBeCloseTo(110);
+		expect(rulePricedItem.base_rate).toBeCloseTo(110);
+		expect(rulePricedItem.discount_amount).toBeCloseTo(10);
+		expect(manualItem.rate).toBeCloseTo(75);
+		expect(manualItem.base_rate).toBeCloseTo(75);
+		expect(uomPricedItem.rate).toBeCloseTo(110);
+		expect(uomPricedItem.base_rate).toBeCloseTo(110);
 
 		delete global.frappe;
 	});

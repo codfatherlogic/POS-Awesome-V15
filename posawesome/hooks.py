@@ -1,29 +1,28 @@
-from posawesome.utils import get_build_version
-
 app_name = "posawesome"
 app_title = "POS Awesome"
-app_publisher = "Youssef Restom"
+app_publisher = "defendicon"
 app_description = "POS Awesome"
 app_icon = "octicon octicon-file-directory"
 app_color = "grey"
-app_email = "youssef@totrox.com"
+app_email = "defendicon@github.com"
 app_license = "GPLv3"
+app_url = "https://github.com/defendicon/POS-Awesome-V15"
+app_source_link = "https://github.com/defendicon/POS-Awesome-V15"
+source_link = "https://github.com/defendicon/POS-Awesome-V15"
+
+# POS Awesome extends ERPNext heavily (custom fields, controller overrides,
+# and many `from erpnext...` imports). Declare the hard dependency so bench
+# installs/loads ERPNext first and refuses to install without it.
+required_apps = ["erpnext"]
 
 # Includes in <head>
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/posawesome/css/posawesome.css"
-# app_include_js = "/assets/posawesome/js/posawesome.js"
-_asset_version = get_build_version()
-
-app_include_js = [
-    f"/assets/posawesome/dist/js/loader.js?v={_asset_version}",
-]
-
-app_include_css = [
-    f"/assets/posawesome/dist/js/posawesome.css?v={_asset_version}",
-]
+# POS assets are loaded on-demand from the POS page bootstrap so the Desk shell
+# does not retain stale bundles across bench builds.
+app_include_js = []
+app_include_css = []
 
 # include js, css files in header of web template
 # web_include_css = "/assets/posawesome/css/posawesome.css"
@@ -73,14 +72,13 @@ doctype_js = {
 # after_install = "posawesome.install.after_install"
 # before_uninstall = "posawesome.uninstall.before_uninstall"
 after_uninstall = "posawesome.uninstall.after_uninstall"
-after_migrate = [
-    "posawesome.patches.add_pos_cash_movement_settings.execute",
-    "posawesome.patches.add_cash_movement_to_workspace.execute",
-    "posawesome.patches.add_customer_display_settings.execute",
-    "posawesome.patches.add_dashboard_settings.execute",
-    "posawesome.patches.add_dashboard_global_settings.execute",
-    "posawesome.patches.reorganize_pos_profile_sections.execute",
-]
+# NOTE: these migrations are registered one-shot in patches.txt and must NOT
+# also run on every `bench migrate`. Running them via after_migrate re-rewrote
+# the POS Awesome workspace and POS Profile section ordering on every migrate,
+# destroying any user customization. The three that previously lived only here
+# (add_gift_card_pos_profile_settings, migrate_pos_supervisor_to_role,
+# remove_item_barcode_posa_uom) have been moved into patches.txt.
+after_migrate = []
 
 # Desk Notifications
 # ------------------
@@ -105,23 +103,50 @@ after_migrate = [
 # Hook on document methods and events
 
 doc_events = {
+    "Item": {
+        "after_insert": "posawesome.posawesome.api.item_processing.alternates.clear_alternate_item_caches",
+        "on_update": "posawesome.posawesome.api.item_processing.alternates.clear_alternate_item_caches",
+        "on_trash": "posawesome.posawesome.api.item_processing.alternates.clear_alternate_item_caches",
+    },
     "Sales Invoice": {
         "validate": "posawesome.posawesome.api.invoice.validate",
+        "before_save": "posawesome.posawesome.api.payment_currency.preserve_multi_currency_payment_amounts",
         "before_submit": "posawesome.posawesome.api.invoice.before_submit",
         "before_cancel": "posawesome.posawesome.api.invoice.before_cancel",
+        "on_cancel": "posawesome.posawesome.api.invoice.on_cancel",
     },
     "POS Invoice": {
         "validate": "posawesome.posawesome.api.invoice.validate",
+        "before_save": "posawesome.posawesome.api.payment_currency.preserve_multi_currency_payment_amounts",
         "before_submit": "posawesome.posawesome.api.invoice.before_submit",
         "before_cancel": "posawesome.posawesome.api.invoice.before_cancel",
+        "on_cancel": "posawesome.posawesome.api.invoice.on_cancel",
     },
     "Customer": {
         "validate": "posawesome.posawesome.api.customer.validate",
         "after_insert": "posawesome.posawesome.api.customer.after_insert",
     },
     "Bin": {
-        "after_insert": "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
-        "on_update": "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
+        "after_insert": [
+            "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
+            "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+        ],
+        "on_update": [
+            "posawesome.posawesome.stock_realtime.publish_bin_stock_change",
+            "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+        ],
+    },
+    "Stock Ledger Entry": {
+        "after_insert": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+        "on_cancel": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+    },
+    "Serial No": {
+        "after_insert": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+        "on_update": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+    },
+    "Batch": {
+        "after_insert": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
+        "on_update": "posawesome.posawesome.api.item_fetchers.clear_stock_caches",
     },
 }
 
@@ -171,6 +196,17 @@ override_doctype_class = {
     "POS Invoice Merge Log": "posawesome.posawesome.overrides.pos_invoice_merge_log.CustomPOSInvoiceMergeLog",
 }
 
+# ERPNext v16 calls SalesInvoice.is_subcontracted() with an empty Sales Order
+# filter for ordinary invoices and returns whose items are not linked to an
+# order. Extend the standard Sales Invoice controller after Frappe resolves any
+# concrete override so this compatibility guard composes with other apps.
+extend_doctype_class = {
+    "Sales Invoice": [
+        "posawesome.posawesome.overrides.multi_currency_payments.MultiCurrencyPOSPaymentsMixin",
+        "posawesome.posawesome.overrides.sales_invoice_subcontracting.SalesInvoiceSubcontractingGuardMixin"
+    ],
+}
+
 # exempt linked doctypes from being automatically cancelled
 #
 # auto_cancel_exempted_doctypes = ["Auto Repeat"]
@@ -185,7 +221,6 @@ fixtures = [
                 (
                     "Sales Invoice-posa_pos_opening_shift",
                     "POS Invoice-posa_pos_opening_shift",
-                    "Item Barcode-posa_uom",
                     "POS Profile-posa_pos_awesome_settings",
                     "POS Profile-posa_section_pricing_controls",
                     "POS Profile-posa_section_sales_returns",
@@ -204,7 +239,12 @@ fixtures = [
                     "POS Profile-posa_pos_awesome_advance_settings",
                     "Batch-posa_batch_price",
                     "POS Profile-posa_max_discount_allowed",
+                    "POS Profile-posa_enable_below_cost_guard",
+                    "POS Profile-posa_below_cost_action",
+                    "POS Profile-posa_minimum_margin_percentage",
+                    "POS Profile-posa_missing_cost_action",
                     "POS Profile-posa_allow_return",
+                    "POS Profile-posa_allow_item_exchange",
                     "POS Profile-posa_allow_return_without_invoice",
                     "POS Profile-posa_allow_free_batch_return",
                     "POS Profile-posa_col_1",
@@ -216,6 +256,10 @@ fixtures = [
                     "POS Profile-posa_force_server_items",
                     "POS Profile-posa_cash_mode_of_payment",
                     "POS Profile-use_customer_credit",
+                    "POS Profile-posa_use_gift_cards",
+                    "POS Profile-posa_allow_supervisor_manage_gift_cards",
+                    "Sales Invoice-gift_card_redemptions",
+                    "POS Invoice-gift_card_redemptions",
                     "POS Profile-use_cashback",
                     "POS Profile-posa_hide_closing_shift",
                     "Customer-posa_discount",
@@ -286,9 +330,11 @@ fixtures = [
                     "POS Profile-posa_allow_write_off_change",
                     "POS Profile-posa_new_line",
                     "POS Profile-posa_input_qty",
+                    "POS Profile-posa_focus_cart_qty_after_item_add",
                     "POS Profile-posa_display_item_code",
                     "POS Profile-posa_allow_zero_rated_items",
                     "POS Profile-posa_allow_print_draft_invoices",
+                    "POS Profile-posa_allow_select_print_format_in_payments",
                     "Address-posa_delivery_charges",
                     "Sales Invoice-posa_delivery_charges",
                     "Sales Invoice-posa_delivery_charges_rate",
@@ -305,6 +351,15 @@ fixtures = [
                     "POS Profile-column_break_dqsba",
                     "POS Profile-posa_use_server_cache",
                     "POS Profile-posa_server_cache_duration",
+                    "POS Profile-posa_fast_counter_mode",
+                    "POS Profile-posa_hot_catalog_limit",
+                    "POS Profile-posa_fast_counter_positive_stock_only",
+                    "POS Profile-posa_allow_item_quick_edit",
+                    "POS Profile-posa_ui_template",
+                    "Item-retailmind_short_name",
+                    "Item-retailmind_controlled_item",
+                    "Item-retailmind_non_discountable",
+                    "Item-retailmind_locked_for_sale",
                     "POS Profile-posa_allow_duplicate_customer_names",
                     "POS Profile-column_break_anyol",
                     "POS Profile-pose_use_limit_search",
@@ -315,6 +370,8 @@ fixtures = [
                     "POS Profile-posa_allow_reconcile_payments",
                     "POS Profile-column_break_uolvm",
                     "POS Profile-posa_allow_mpesa_reconcile_payments",
+                    "POS Profile-posa_enable_print_audit",
+                    "POS Profile-posa_qz_printer_name",
                     "POS Profile-posa_enable_camera_scanning",
                     "POS Profile-posa_camera_scan_type",
                     "POS Profile-posa_language",
@@ -345,9 +402,24 @@ fixtures = [
                     "POS Settings-posa_dashboard_low_stock_alert_threshold",
                     "POS Invoice-posa_return_valid_upto",
                     "Sales Invoice-posa_return_valid_upto",
+                    "Sales Invoice-posa_cashier",
+                    "POS Invoice-posa_cashier",
+                    "Sales Invoice-posa_below_cost_override",
+                    "Sales Invoice-posa_below_cost_override_by",
+                    "Sales Invoice-posa_below_cost_override_reason",
+                    "Sales Invoice-posa_below_cost_override_details",
+                    "POS Invoice-posa_below_cost_override",
+                    "POS Invoice-posa_below_cost_override_by",
+                    "POS Invoice-posa_below_cost_override_reason",
+                    "POS Invoice-posa_below_cost_override_details",
+                    "User-posa_pos_pin",
                 ),
             ]
         ],
+    },
+    {
+        "doctype": "Role",
+        "filters": [["name", "in", ("POS Awesome Supervisor",)]],
     },
     {
         "doctype": "Property Setter",
@@ -373,8 +445,42 @@ fixtures = [
                 [
                     "POS Profile-posa_allow_multi_currency",
                     "POS Profile-posa_decimal_precision",
+                    "POS Profile-posa_enable_multi_currency_payments",
+                    "POS Profile-posa_allowed_currencies",
+                    "POS Profile-posa_allow_payment_currency_selection",
+                    "POS Profile-posa_allow_manual_payment_exchange_rate",
+                    "POS Profile-posa_default_payment_currency",
+                    "POS Profile-posa_enable_multi_currency_change",
+                    "POS Payment Method-posa_default_payment_currency",
+                    "Sales Invoice Payment-posa_payment_currency",
+                    "Sales Invoice Payment-posa_original_amount",
+                    "Sales Invoice Payment-posa_exchange_rate",
+                    "Sales Invoice Payment-posa_company_exchange_rate",
+                    "Sales Invoice Payment-posa_rate_date",
+                    "Sales Invoice Payment-posa_rate_source",
+                    "Sales Invoice Payment-posa_account_currency",
+                    "Sales Invoice Payment-posa_account_amount",
+                    "Payment Entry-posa_payment_currency",
+                    "Payment Entry-posa_original_amount",
+                    "Payment Entry-posa_invoice_currency",
+                    "Payment Entry-posa_exchange_rate",
+                    "Payment Entry-posa_company_exchange_rate",
+                    "Payment Entry-posa_rate_date",
+                    "Payment Entry-posa_rate_source",
+                    "Payment Entry-posa_account_currency",
+                    "Payment Entry-posa_account_amount",
+                    "Sales Invoice-posa_change_returns",
+                    "Sales Invoice-posa_change_returned",
+                    "Sales Invoice-posa_remaining_change",
+                    "POS Invoice-posa_change_returns",
+                    "POS Invoice-posa_change_returned",
+                    "POS Invoice-posa_remaining_change",
                 ],
             ]
         ],
     },
 ]
+
+# Permissions for Custom DocTypes
+# --------------------------------
+permissions = []

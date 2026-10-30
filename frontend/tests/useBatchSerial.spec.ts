@@ -1,15 +1,49 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useBatchSerial } from "../src/posapp/composables/pos/shared/useBatchSerial";
+import {
+	getDisplayableBatchOptions,
+	useBatchSerial,
+} from "../src/posapp/composables/pos/shared/useBatchSerial";
+
+beforeEach(() => {
+	vi.spyOn(console, "debug").mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("useBatchSerial.setSerialNo", () => {
+	it("keeps sales UOM quantity when serial count matches converted stock quantity", () => {
+		const { setSerialNo } = useBatchSerial();
+		const item: any = {
+			has_serial_no: 1,
+			qty: 1,
+			stock_qty: 2,
+			conversion_factor: 2,
+			serial_no_data: [
+				{ serial_no: "SER-001" },
+				{ serial_no: "SER-002" },
+			],
+			serial_no_selected: ["SER-001", "SER-002"],
+		};
+
+		setSerialNo(item, { forceUpdate: vi.fn() });
+
+		expect(item.qty).toBe(1);
+		expect(item.stock_qty).toBe(2);
+	});
+
 	it("does not force qty to zero when no serial is selected", () => {
 		const { setSerialNo } = useBatchSerial();
 		const context = { forceUpdate: vi.fn() };
 		const item: any = {
 			has_serial_no: 1,
 			has_batch_no: 0,
-			serial_no_data: [{ serial_no: "SER-001" }, { serial_no: "SER-002" }],
+			serial_no_data: [
+				{ serial_no: "SER-001" },
+				{ serial_no: "SER-002" },
+			],
 			serial_no_selected: [],
 			stock_qty: 15,
 			qty: 15,
@@ -64,6 +98,21 @@ describe("useBatchSerial.setSerialNo", () => {
 });
 
 describe("useBatchSerial.setBatchQty", () => {
+	it("returns only batches with stock greater than zero for display", () => {
+		expect(
+			getDisplayableBatchOptions([
+				{ batch_no: "B-AVAILABLE", available_qty: 3 },
+				{ batch_no: "B-ZERO", available_qty: 0 },
+				{ batch_no: "B-NEGATIVE", available_qty: -2 },
+				{ batch_no: "B-FALLBACK", batch_qty: 4 },
+				{ batch_no: "B-FALLBACK-ZERO", batch_qty: 0 },
+			]),
+		).toEqual([
+			{ batch_no: "B-AVAILABLE", available_qty: 3 },
+			{ batch_no: "B-FALLBACK", batch_qty: 4 },
+		]);
+	});
+
 	it("ignores expired batches and picks next non-expired batch", () => {
 		const { setBatchQty } = useBatchSerial();
 		const context: any = {
@@ -101,5 +150,197 @@ describe("useBatchSerial.setBatchQty", () => {
 		expect(item.batch_no_data.map((b: any) => b.batch_no)).toEqual([
 			"B-VALID",
 		]);
+	});
+
+	it("reserves existing cart quantities in stock UOM", () => {
+		const { getBatchAvailability } = useBatchSerial();
+		const item: any = {
+			posa_row_id: "ROW-NEW",
+			item_code: "BOXED",
+			qty: 1,
+			conversion_factor: 6,
+			batch_no_data: [{ batch_no: "B-1", batch_qty: 12 }],
+		};
+		const batches = getBatchAvailability(item, {
+			items: [
+				item,
+				{
+					posa_row_id: "ROW-EXISTING",
+					item_code: "BOXED",
+					batch_no: "B-1",
+					qty: 1,
+					conversion_factor: 6,
+				},
+			],
+		});
+
+		expect(batches[0].available_qty).toBe(6);
+	});
+
+	it("applies batch price immediately during auto batch selection", () => {
+		const { setBatchQty } = useBatchSerial();
+		const context: any = {
+			items: [],
+			pos_profile: { currency: "USD" },
+			price_list_currency: "USD",
+			selected_currency: "USD",
+			exchange_rate: 1,
+			currency_precision: 2,
+			flt: (value: any) => Number(value),
+			forceUpdate: vi.fn(),
+		};
+
+		const item: any = {
+			item_code: "ITEM-BATCH-PRICE",
+			qty: 2,
+			has_batch_no: 1,
+			has_serial_no: 0,
+			rate: 15,
+			price_list_rate: 15,
+			base_rate: 15,
+			base_price_list_rate: 15,
+			batch_no_data: [
+				{
+					batch_no: "B-FEFO",
+					batch_qty: 8,
+					batch_price: 12,
+					is_expired: false,
+				},
+			],
+		};
+
+		setBatchQty(item, null, false, context);
+
+		expect(item.batch_no).toBe("B-FEFO");
+		expect(item.batch_price).toBe(12);
+		expect(item.base_batch_price).toBe(12);
+		expect(item.rate).toBe(12);
+		expect(item.price_list_rate).toBe(12);
+		expect(item.base_rate).toBe(12);
+		expect(item.base_price_list_rate).toBe(12);
+		expect(item.amount).toBe(24);
+		expect(item.base_amount).toBe(24);
+	});
+
+	it("converts company-currency batch price to selected currency using invoice conversion rate", () => {
+		const { setBatchQty } = useBatchSerial();
+		const context: any = {
+			items: [],
+			pos_profile: { currency: "PKR" },
+			price_list_currency: "PKR",
+			selected_currency: "USD",
+			conversion_rate: 280,
+			exchange_rate: 1,
+			currency_precision: 2,
+			flt: (value: any) => Number(value),
+			forceUpdate: vi.fn(),
+		};
+
+		const item: any = {
+			item_code: "ITEM-BATCH-MC",
+			qty: 2,
+			has_batch_no: 1,
+			has_serial_no: 0,
+			rate: 15,
+			price_list_rate: 15,
+			base_rate: 4200,
+			base_price_list_rate: 4200,
+			batch_no_data: [
+				{
+					batch_no: "B-MC",
+					batch_qty: 8,
+					batch_price: 2800,
+					is_expired: false,
+				},
+			],
+		};
+
+		setBatchQty(item, null, false, context);
+
+		expect(item.batch_price).toBe(10);
+		expect(item.base_batch_price).toBe(2800);
+		expect(item.rate).toBe(10);
+		expect(item.price_list_rate).toBe(10);
+		expect(item.base_rate).toBe(2800);
+		expect(item.base_price_list_rate).toBe(2800);
+		expect(item.amount).toBe(20);
+		expect(item.base_amount).toBe(5600);
+	});
+
+	it("does not zero item totals when selected batch has no positive batch price", () => {
+		const { setBatchQty } = useBatchSerial();
+		const context: any = {
+			items: [],
+			pos_profile: { currency: "USD" },
+			price_list_currency: "USD",
+			selected_currency: "USD",
+			exchange_rate: 1,
+			currency_precision: 2,
+			flt: (value: any) => Number(value),
+			forceUpdate: vi.fn(),
+		};
+
+		const item: any = {
+			item_code: "ITEM-BATCH-ZERO-PRICE",
+			qty: 2,
+			has_batch_no: 1,
+			has_serial_no: 0,
+			rate: 15,
+			price_list_rate: 15,
+			base_rate: 15,
+			base_price_list_rate: 15,
+			amount: 30,
+			base_amount: 30,
+			batch_no_data: [
+				{
+					batch_no: "B-ZERO-PRICE",
+					batch_qty: 8,
+					batch_price: 0,
+					is_expired: false,
+				},
+			],
+		};
+
+		setBatchQty(item, "B-ZERO-PRICE", false, context);
+
+		expect(item.batch_no).toBe("B-ZERO-PRICE");
+		expect(item.rate).toBe(15);
+		expect(item.price_list_rate).toBe(15);
+		expect(item.base_rate).toBe(15);
+		expect(item.base_price_list_rate).toBe(15);
+		expect(item.amount).toBe(30);
+		expect(item.base_amount).toBe(30);
+	});
+
+	it("does not replace a locked return price when batch changes", () => {
+		const { setBatchQty } = useBatchSerial();
+		const context: any = {
+			items: [],
+			pos_profile: { currency: "USD" },
+			price_list_currency: "USD",
+			selected_currency: "USD",
+			exchange_rate: 1,
+			currency_precision: 2,
+			flt: Number,
+		};
+		const item: any = {
+			item_code: "RETURN-BATCH",
+			qty: -1,
+			has_batch_no: 1,
+			locked_price: true,
+			rate: 15,
+			price_list_rate: 15,
+			base_rate: 15,
+			base_price_list_rate: 15,
+			batch_no_data: [
+				{ batch_no: "B-RETURN", batch_qty: 5, batch_price: 9 },
+			],
+		};
+
+		setBatchQty(item, "B-RETURN", false, context);
+
+		expect(item.batch_no).toBe("B-RETURN");
+		expect(item.rate).toBe(15);
+		expect(item.price_list_rate).toBe(15);
 	});
 });

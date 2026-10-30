@@ -138,9 +138,13 @@ import {
 	getOpeningDialogStorage,
 	setOpeningDialogStorage,
 	setOpeningStorage,
+	getBootstrapSnapshot,
+	setBootstrapSnapshot,
 	initPromise,
 	checkDbHealth,
 } from "../../../../offline/index";
+import { createBootstrapSnapshotFromRegisterData } from "../../../../offline/bootstrapSnapshot";
+import authService from "../../../services/authService";
 
 defineOptions({
 	name: "OpeningDialog",
@@ -153,6 +157,7 @@ const props = defineProps({
 const emit = defineEmits(["close", "register"]);
 const __ = window.__ || ((text) => text);
 const get_currency_symbol = window.get_currency_symbol;
+const BUILD_VERSION = typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
 
 const isOpen = ref(props.dialog ? props.dialog : false);
 const is_loading = ref(false);
@@ -219,10 +224,11 @@ watch(pos_profile, (val) => {
 async function get_opening_dialog_data() {
 	await initPromise;
 	await checkDbHealth();
+	const currentUser = frappe?.session?.user || "";
 
 	// Load cached data first for offline usage
 	const cached = getOpeningDialogStorage();
-	if (cached) {
+	if (cached?.user === currentUser) {
 		try {
 			companies.value = cached.companies.map((c) => c.name);
 			pos_profiles_data.value = cached.pos_profiles_data || [];
@@ -243,7 +249,10 @@ async function get_opening_dialog_data() {
 				payments_method_data.value = r.message.payments_method;
 				company.value = companies.value[0] || "";
 				try {
-					setOpeningDialogStorage(r.message);
+					setOpeningDialogStorage({
+						...r.message,
+						user: currentUser,
+					});
 				} catch (e) {
 					console.error("Failed to cache opening dialog data", e);
 				}
@@ -270,6 +279,11 @@ function submit_dialog() {
 				emit("register", r.message);
 				try {
 					setOpeningStorage(r.message);
+					setBootstrapSnapshot(
+						createBootstrapSnapshotFromRegisterData(r.message, getBootstrapSnapshot(), {
+							buildVersion: BUILD_VERSION,
+						}),
+					);
 				} catch (e) {
 					console.error("Failed to cache opening data", e);
 				}
@@ -288,7 +302,7 @@ function go_desk() {
 function logout() {
 	const redirectTarget = "/app/posapp";
 	const loginPath = `/login?redirect-to=${encodeURIComponent(redirectTarget)}`;
-	frappe.call("logout").finally(() => {
+	authService.logout().finally(() => {
 		const loginUrl =
 			frappe?.utils?.get_url?.(loginPath) ??
 			(frappe?.urllib?.get_base_url?.() ? `${frappe.urllib.get_base_url()}${loginPath}` : loginPath);
@@ -306,8 +320,8 @@ onMounted(() => {
 .opening-dialog-card {
 	border-radius: 16px;
 	overflow: hidden;
-	background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-	border: 1px solid rgba(25, 118, 210, 0.1);
+	background: var(--pos-card-bg);
+	border: 1px solid var(--pos-border);
 	transition: all 0.3s ease;
 	max-height: 90vh;
 	display: flex;
@@ -316,8 +330,8 @@ onMounted(() => {
 
 /* Header Section - White Background with Blue Text */
 .opening-dialog-header {
-	background: white;
-	color: #1976d2;
+	background: var(--pos-card-bg);
+	color: var(--pos-primary);
 	padding: 16px 24px;
 	border-bottom: 2px solid rgba(25, 118, 210, 0.1);
 	flex-shrink: 0;
@@ -341,7 +355,7 @@ onMounted(() => {
 
 .header-icon {
 	font-size: 20px;
-	color: #1976d2;
+	color: var(--pos-primary);
 }
 
 .header-text {
@@ -353,7 +367,7 @@ onMounted(() => {
 	font-weight: 600;
 	margin: 0;
 	line-height: 1.2;
-	color: #1976d2;
+	color: var(--pos-primary);
 }
 
 .header-subtitle {
@@ -361,13 +375,13 @@ onMounted(() => {
 	opacity: 0.8;
 	margin: 2px 0 0 0;
 	line-height: 1.3;
-	color: #1976d2;
+	color: var(--pos-primary);
 }
 
 /* Content Section - Optimized for minimal scrolling */
 .opening-dialog-content {
 	padding: 20px 24px;
-	background: white;
+	background: var(--pos-card-bg);
 	flex: 1;
 	overflow-y: auto;
 }
@@ -382,12 +396,12 @@ onMounted(() => {
 	gap: 6px;
 	font-size: 1rem;
 	font-weight: 600;
-	color: #1976d2;
+	color: var(--pos-primary);
 	margin-bottom: 0;
 }
 
 .section-icon {
-	color: #1976d2;
+	color: var(--pos-primary);
 	font-size: 18px;
 }
 
@@ -422,8 +436,8 @@ onMounted(() => {
 }
 
 .enhanced-table-compact :deep(th) {
-	background: linear-gradient(135deg, #f8f9fa 0%, #e3f2fd 100%);
-	color: #1976d2;
+	background: var(--pos-table-header-bg);
+	color: var(--pos-primary);
 	font-weight: 600;
 	border-bottom: 1px solid rgba(25, 118, 210, 0.1);
 	padding: 8px 12px;
@@ -463,13 +477,13 @@ onMounted(() => {
 
 .currency-symbol {
 	font-weight: 600;
-	color: #1976d2;
+	color: var(--pos-primary);
 	font-size: 0.9rem;
 }
 
 .amount-value {
 	font-weight: 500;
-	color: #333;
+	color: var(--pos-text-primary);
 	font-size: 0.9rem;
 }
 
@@ -632,8 +646,8 @@ onMounted(() => {
 
 /* Action buttons with improved naming and styling */
 .dialog-actions-container {
-	background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-	border-top: 1px solid #e0e0e0;
+	background: var(--pos-card-bg);
+	border-top: 1px solid var(--pos-border);
 	padding: 16px 24px;
 	gap: 12px;
 }

@@ -1,11 +1,11 @@
 <template>
 	<v-row justify="center">
-		<v-dialog v-model="dialogVisible" max-width="600px">
+		<v-dialog v-model="dialogVisible" max-width="920px">
 			<v-card min-height="500px">
 				<v-card-title>
-					<span class="text-h5 text-primary">Select Item</span>
+					<span class="text-h5 text-primary">{{ __("Select Item") }}</span>
 					<v-spacer></v-spacer>
-					<v-btn color="error" theme="dark" @click="close_dialog">Close</v-btn>
+					<v-btn color="error" theme="dark" @click="close_dialog">{{ __("Close") }}</v-btn>
 				</v-card-title>
 				<v-card-text class="pa-0">
 					<v-container v-if="parentItem">
@@ -38,23 +38,29 @@
 							<v-divider class="p-0 m-0"></v-divider>
 						</div>
 						<div>
-							<v-row density="default" class="overflow-y-auto" style="max-height: 500px">
+							<v-row density="default" class="variant-grid overflow-y-auto">
 								<v-col
 									v-for="(item, idx) in displayItems"
-									:key="idx"
-									xl="2"
-									lg="3"
+									:key="item.item_code || idx"
 									md="4"
-									sm="4"
-									cols="6"
+									sm="6"
+									cols="12"
 									min-height="50"
 								>
-									<v-card hover="hover" @click="add_item(item)">
+									<v-card
+										:hover="!isUnavailable(item)"
+										:disabled="isUnavailable(item)"
+										:aria-disabled="isUnavailable(item)"
+										:title="isUnavailable(item) ? __('Out of Stock') : item.item_name"
+										class="variant-card"
+										:class="{ 'variant-card--unavailable': isUnavailable(item) }"
+										@click="add_item(item)"
+									>
 										<v-img
 											:src="item.image || placeholderImage"
 											class="text-white align-end"
 											gradient="to bottom, rgba(0,0,0,.2), rgba(0,0,0,.7)"
-											height="100px"
+											height="132px"
 										>
 											<v-card-text
 												v-text="item.item_name"
@@ -62,11 +68,48 @@
 											></v-card-text>
 										</v-img>
 										<v-card-text class="text--primary pa-1">
-											<div class="text-caption text-primary text-accent-3">
+											<div
+												class="text-caption text-primary text-accent-3 variant-price"
+											>
 												{{
 													formatCurrencySafe(item.price_list_rate ?? item.rate ?? 0)
 												}}
 												{{ item.currency || "" }}
+											</div>
+											<div class="variant-meta-panel">
+												<div class="variant-meta-row">
+													<v-icon size="x-small">mdi-barcode</v-icon>
+													<div class="variant-meta-copy">
+														<span class="variant-meta-label">{{
+															__("Barcode")
+														}}</span>
+														<span
+															class="variant-meta-value variant-barcode-value"
+															:title="variantBarcode(item) || ''"
+														>
+															{{ variantBarcode(item) || "—" }}
+														</span>
+													</div>
+												</div>
+												<div class="variant-meta-row">
+													<v-icon size="x-small">mdi-package-variant-closed</v-icon>
+													<div class="variant-meta-copy">
+														<span class="variant-meta-label">{{
+															__("Available Qty")
+														}}</span>
+														<span class="variant-meta-value">
+															{{ formatAvailableQty(item) }}
+															{{
+																variantAvailableQty(item) === null
+																	? ""
+																	: item.stock_uom || ""
+															}}
+														</span>
+													</div>
+												</div>
+											</div>
+											<div v-if="isUnavailable(item)" class="variant-out-of-stock">
+												{{ __("Out of Stock") }}
 											</div>
 										</v-card-text>
 									</v-card>
@@ -88,6 +131,11 @@ import placeholderImage from "../placeholder-image.png";
 import { getCurrentInstance } from "vue";
 import { useUIStore } from "../../../stores/uiStore.js";
 import { useInvoiceStore } from "../../../stores/invoiceStore.js";
+import {
+	getVariantCardAvailableQty,
+	getVariantCardBarcode,
+	isVariantCardUnavailable,
+} from "../../../utils/variantCard";
 export default {
 	setup() {
 		const { proxy } = getCurrentInstance();
@@ -226,6 +274,28 @@ export default {
 				minimumFractionDigits: 0,
 				maximumFractionDigits: 2,
 			}).format(val);
+		},
+		variantBarcode(item) {
+			return getVariantCardBarcode(item);
+		},
+		variantAvailableQty(item) {
+			return getVariantCardAvailableQty(item);
+		},
+		formatAvailableQty(item) {
+			const quantity = this.variantAvailableQty(item);
+			if (quantity === null) return "—";
+
+			const mixinFn =
+				this.$options.mixins &&
+				this.$options.mixins[0] &&
+				this.$options.mixins[0].methods &&
+				this.$options.mixins[0].methods.formatFloat;
+			if (mixinFn) return mixinFn.call(this, quantity);
+
+			return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(quantity);
+		},
+		isUnavailable(item) {
+			return isVariantCardUnavailable(item, this.pos_profile, this.uiStore.stockSettings);
 		},
 		applyCurrencyConversionToItem(item) {
 			if (!item) return;
@@ -369,6 +439,7 @@ export default {
 			}
 		},
 		async add_item(item) {
+			if (this.isUnavailable(item)) return;
 			await this.fetchVariantRate(item);
 			const payload = { ...item, code: item.item_code };
 			// Using event bus to trigger logic-heavy add_item in Invoice.vue
@@ -390,3 +461,88 @@ export default {
 	},
 };
 </script>
+
+<style scoped>
+.variant-card {
+	height: 100%;
+	min-height: 270px;
+}
+
+.variant-grid {
+	max-height: min(68vh, 640px);
+}
+
+.variant-price {
+	font-weight: 600;
+	font-size: 0.86rem;
+	margin-bottom: 8px;
+}
+
+.variant-meta-panel {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px;
+	padding: 8px;
+	border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+	border-radius: 8px;
+	background: rgba(var(--v-theme-on-surface), 0.045);
+}
+
+.variant-meta-row {
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
+	align-items: start;
+	gap: 6px;
+	min-width: 0;
+	line-height: 1.35;
+	color: rgba(var(--v-theme-on-surface), 0.72);
+}
+
+.variant-meta-copy {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.variant-meta-label {
+	font-weight: 600;
+	font-size: 0.66rem;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	color: rgba(var(--v-theme-on-surface), 0.62);
+}
+
+.variant-meta-value {
+	display: block;
+	min-height: 1.25rem;
+	font-size: 0.82rem;
+	font-weight: 700;
+	color: rgb(var(--v-theme-on-surface));
+	overflow-wrap: anywhere;
+}
+
+.variant-barcode-value {
+	font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+	font-size: 0.76rem;
+	letter-spacing: 0.02em;
+}
+
+.variant-card--unavailable {
+	filter: grayscale(0.8);
+	opacity: 0.58;
+	cursor: not-allowed;
+}
+
+.variant-out-of-stock {
+	margin-top: 8px;
+	font-size: 0.7rem;
+	font-weight: 700;
+	color: rgb(var(--v-theme-error));
+}
+
+@media (max-width: 700px) {
+	.variant-card {
+		min-height: 250px;
+	}
+}
+</style>

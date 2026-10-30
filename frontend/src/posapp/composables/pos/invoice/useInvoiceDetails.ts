@@ -1,7 +1,34 @@
+/**
+ * Secondary invoice fields: shipping addresses, sales persons, and date inputs.
+ *
+ * All dependencies are injected through `InvoiceDetailsOptions` rather than
+ * imported directly, making this composable fully testable in isolation.
+ * The composable mutates `invoiceDoc` fields in place via `unref()`.
+ *
+ * **Shipping addresses**
+ * `fetch_customer_shipping_address` calls the server and writes results into
+ * `customer_addresses`. When `isOffline()` returns true the call is skipped and
+ * `getCachedCustomerAddresses` is used instead. The `Address` interface describes
+ * the address shape returned by both paths.
+ *
+ * **Sales persons**
+ * If the POS profile pre-defines sales persons they are used as-is; otherwise
+ * `getSalesPersonsStorage` supplies the session list. The `SalesPerson` interface
+ * is exported for callers that render the selector.
+ *
+ * **Date inputs**
+ * - `delivery_date` / `po_date`: straightforward date pickers on the invoice.
+ * - `posa_credit_due_date`: preset buttons (7 / 14 / 30 days) + custom dialog.
+ * - `posa_return_valid_upto`: return validity date; the allowed window in days is
+ *   read from `profile.posa_return_validity_days` (or system settings fallback).
+ */
 import { ref, unref, type Ref } from "vue";
 import { formatUtils, normalizeDateForBackend } from "../../../format";
 import {
 	getSalesPersonsStorage,
+	getCachedCustomerAddresses,
+	isOffline,
+	saveCustomerAddressesCache,
 	setSalesPersonsStorage,
 } from "../../../../offline/index";
 
@@ -134,6 +161,23 @@ export function useInvoiceDetails(options: InvoiceDetailsOptions) {
 			addresses.value = [];
 			return;
 		}
+
+		const applyCachedAddresses = () => {
+			const cachedAddresses = getCachedCustomerAddresses(doc.customer);
+			if (!Array.isArray(cachedAddresses) || !cachedAddresses.length) {
+				return false;
+			}
+			const normalized = cachedAddresses
+				.map((row) => normalizeAddress(row))
+				.filter((row): row is Address => row !== null);
+			addresses.value = normalized;
+			return true;
+		};
+
+		if (isOffline() && applyCachedAddresses()) {
+			return;
+		}
+
 		frappe.call({
 			method: "posawesome.posawesome.api.customers.get_customer_addresses",
 			args: { customer: doc.customer },
@@ -145,6 +189,7 @@ export function useInvoiceDetails(options: InvoiceDetailsOptions) {
 						.map((row) => normalizeAddress(row))
 						.filter((row): row is Address => row !== null);
 					addresses.value = normalized;
+					saveCustomerAddressesCache(doc.customer, normalized);
 
 					if (
 						doc.shipping_address_name &&
@@ -155,6 +200,13 @@ export function useInvoiceDetails(options: InvoiceDetailsOptions) {
 						doc.shipping_address_name = null;
 					}
 				} else {
+					if (!applyCachedAddresses()) {
+						addresses.value = [];
+					}
+				}
+			},
+			error: function () {
+				if (!applyCachedAddresses()) {
 					addresses.value = [];
 				}
 			},

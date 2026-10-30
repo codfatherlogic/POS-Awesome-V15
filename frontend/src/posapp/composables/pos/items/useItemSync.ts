@@ -9,6 +9,31 @@ import {
 	shouldRunBackgroundSync,
 } from "../../../utils/backgroundSync.js";
 
+const visibilityCallbacks = new Set<() => void>();
+let visibilityHandler: (() => void) | null = null;
+
+function bindSharedVisibilityListener(callback: () => void) {
+	visibilityCallbacks.add(callback);
+	if (typeof document === "undefined" || visibilityHandler) return;
+	visibilityHandler = () => {
+		visibilityCallbacks.forEach((listener) => listener());
+	};
+	document.addEventListener("visibilitychange", visibilityHandler);
+}
+
+function unbindSharedVisibilityListener(callback: () => void) {
+	visibilityCallbacks.delete(callback);
+	if (
+		typeof document === "undefined" ||
+		visibilityCallbacks.size ||
+		!visibilityHandler
+	) {
+		return;
+	}
+	document.removeEventListener("visibilitychange", visibilityHandler);
+	visibilityHandler = null;
+}
+
 /**
  * useItemSync Composable
  *
@@ -59,12 +84,13 @@ export function useItemSync() {
 	const isBackgroundLoading = ref(false);
 	const last_background_sync_time = ref<string | null>(null);
 	const BG_SYNC_LOG = "[POSA][BackgroundSync]";
+	const MAX_BACKGROUND_DETAIL_REFRESH_ITEMS = 100;
 
 	// Context (Late Binding)
 	const ctx: ItemSyncContext = {
 		pos_profile: null,
 		enable_background_sync: true,
-		background_sync_interval: 30,
+		background_sync_interval: 60,
 		usesLimitSearch: false,
 		itemsPageLimit: 100,
 		// Methods to be provided via context
@@ -92,6 +118,50 @@ export function useItemSync() {
 		);
 	}
 
+	function getItemCode(item: SyncItem | null | undefined) {
+		const code = item?.item_code;
+		return code === undefined || code === null ? "" : String(code);
+	}
+
+	function getBackgroundDetailRefreshLimit() {
+		const pageLimit = Number(ctx.itemsPageLimit);
+		if (!Number.isFinite(pageLimit) || pageLimit <= 0) {
+			return MAX_BACKGROUND_DETAIL_REFRESH_ITEMS;
+		}
+		return Math.min(pageLimit, MAX_BACKGROUND_DETAIL_REFRESH_ITEMS);
+	}
+
+	function selectVisibleUpdatedItems(updatedItems: SyncItem[]) {
+		if (!Array.isArray(updatedItems) || updatedItems.length === 0) {
+			return [];
+		}
+
+		const displayedCodes = new Set(
+			(ctx.getDisplayedItems() || [])
+				.map((item) => getItemCode(item))
+				.filter(Boolean),
+		);
+		if (displayedCodes.size === 0) {
+			return [];
+		}
+
+		const limit = getBackgroundDetailRefreshLimit();
+		const selected: SyncItem[] = [];
+		const seen = new Set<string>();
+		for (const item of updatedItems) {
+			const code = getItemCode(item);
+			if (!code || seen.has(code) || !displayedCodes.has(code)) {
+				continue;
+			}
+			selected.push(item);
+			seen.add(code);
+			if (selected.length >= limit) {
+				break;
+			}
+		}
+		return selected;
+	}
+
 	function startBackgroundSyncScheduler() {
 		stopBackgroundSyncScheduler();
 		console.debug(`${BG_SYNC_LOG} scheduler start requested`, {
@@ -114,11 +184,20 @@ export function useItemSync() {
 			normalizeBackgroundSyncInterval(ctx.background_sync_interval) *
 			1000;
 		background_sync_timer.value = setInterval(() => {
+			// Skip while the tab is hidden — operators on cheap Android
+			// devices accumulated visible main-thread jank from sync runs
+			// firing in background tabs that the user wasn't even on.
+			// The next visibility change triggers an immediate catch-up
+			// run via the listener below.
+			if (typeof document !== "undefined" && document.hidden) {
+				return;
+			}
 			performBackgroundSync({ source: "interval" });
 		}, intervalMs);
 		console.debug(`${BG_SYNC_LOG} scheduler active`, { intervalMs });
 
 		performBackgroundSync({ source: "initial" });
+		bindVisibilityListener();
 	}
 
 	function stopBackgroundSyncScheduler() {
@@ -127,6 +206,22 @@ export function useItemSync() {
 			background_sync_timer.value = null;
 			console.debug(`${BG_SYNC_LOG} scheduler stopped`);
 		}
+		unbindVisibilityListener();
+	}
+
+	// Visibility listener: pause syncs when the tab is hidden, run a
+	// single catch-up sync when the operator returns. Saves several
+	// MB of allocations per minute on multi-tab Chrome sessions.
+	const onVisibilityChange = () => {
+		if (!document.hidden && ctx.enable_background_sync) {
+			performBackgroundSync({ source: "visibility" });
+		}
+	};
+	function bindVisibilityListener() {
+		bindSharedVisibilityListener(onVisibilityChange);
+	}
+	function unbindVisibilityListener() {
+		unbindSharedVisibilityListener(onVisibilityChange);
 	}
 
 	async function ensureBackgroundSyncBaseline() {
@@ -212,15 +307,27 @@ export function useItemSync() {
 				});
 
 				if (updatedItems && updatedItems.length) {
-					if (ctx.itemDetailFetcher) {
+					const visibleUpdatedItems =
+						selectVisibleUpdatedItems(updatedItems);
+					if (ctx.itemDetailFetcher && visibleUpdatedItems.length) {
 						await ctx.itemDetailFetcher.update_items_details(
-							updatedItems,
+							visibleUpdatedItems,
 							{
 								forceRefresh: true,
 								priceListOverride: backgroundPriceList,
 							},
 						);
 					}
+					console.info(
+						`${BG_SYNC_LOG} visible details refreshed`,
+						{
+							source,
+							refreshedCount: visibleUpdatedItems.length,
+							skippedCount:
+								updatedItems.length -
+								visibleUpdatedItems.length,
+						},
+					);
 					if (ctx.eventBus) {
 						ctx.eventBus.emit("set_all_items", ctx.getItems());
 					}

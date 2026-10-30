@@ -1,6 +1,7 @@
 import { ref, computed, type Ref } from "vue";
 
 declare const flt: (_value: unknown, _precision?: number) => number;
+declare const __: (_text: string, _args?: any[]) => string;
 
 type PosPaySelectionArgs = {
 	posProfile: Ref<any>;
@@ -25,7 +26,7 @@ export function usePosPaySelection({
 				!currency_filter.value ||
 				invoice_currency === currency_filter.value
 			) {
-				return acc + flt(cur?.outstanding_amount || 0);
+				return acc + flt(cur?.outstanding_amount_in_invoice_currency ?? cur?.outstanding_amount ?? 0);
 			}
 			return acc;
 		}, 0);
@@ -34,7 +35,8 @@ export function usePosPaySelection({
 	const total_selected_payments = computed(() => {
 		if (!selected_payments.value.length) return 0;
 		return selected_payments.value.reduce(
-			(acc: number, cur: any) => acc + flt(cur?.unallocated_amount || 0),
+			(acc: number, cur: any) =>
+				acc + flt(cur?.invoice_equivalent ?? cur?.unallocated_amount ?? 0),
 			0,
 		);
 	});
@@ -42,7 +44,7 @@ export function usePosPaySelection({
 	const total_selected_mpesa_payments = computed(() => {
 		if (!selected_mpesa_payments.value.length) return 0;
 		return selected_mpesa_payments.value.reduce(
-			(acc: number, cur: any) => acc + flt(cur?.amount || 0),
+			(acc: number, cur: any) => acc + flt(cur?.invoice_equivalent ?? cur?.amount ?? 0),
 			0,
 		);
 	});
@@ -50,9 +52,22 @@ export function usePosPaySelection({
 	const total_payment_methods = computed(() => {
 		if (!payment_methods.value.length) return 0;
 		return payment_methods.value.reduce((acc: number, cur: any) => {
-			const amount = parseFloat(cur?.amount || 0);
+			const amount = parseFloat(cur?.invoice_equivalent ?? cur?.amount ?? 0);
 			return acc + (isNaN(amount) ? 0 : amount);
 		}, 0);
+	});
+
+	const selected_payments_detail = computed(() => {
+		if (!selected_payments.value.length) return [];
+		return selected_payments.value.map((payment: any) => ({
+			mode_of_payment: payment.mode_of_payment || __("Unknown"),
+			paid_amount: flt(payment.paid_amount || 0),
+			received_amount: flt(payment.received_amount || 0),
+			unallocated_amount: flt(payment.unallocated_amount || 0),
+			currency: payment.currency || posProfile.value?.currency,
+			exchange_rate: flt(payment.source_exchange_rate ?? payment.exchange_rate ?? 1),
+			account: payment.account || "",
+		}));
 	});
 
 	const total_of_diff = computed(() => {
@@ -112,6 +127,7 @@ export function usePosPaySelection({
 		total_selected_payments,
 		total_selected_mpesa_payments,
 		total_payment_methods,
+		selected_payments_detail,
 		total_of_diff,
 		toggleInvoiceSelection,
 		isInvoiceSelected,

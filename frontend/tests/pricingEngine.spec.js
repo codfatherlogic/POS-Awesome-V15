@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { applyLocalPricingRules, computeFreeItems } from "../src/lib/pricingEngine.ts";
+import {
+	applyLocalPricingRules,
+	computeFreeItems,
+	evaluateTransactionPricingRules,
+} from "../src/lib/pricingEngine.ts";
 
 const buildIndexes = (config = {}) => {
 	return {
@@ -31,6 +35,61 @@ describe("pricingEngine - applyLocalPricingRules", () => {
 		});
 		expect(result.rate).toBeCloseTo(90);
 		expect(result.discountPerUnit).toBeCloseTo(10);
+	});
+
+	it("applies an item rule when aggregate cart quantity meets min_qty", () => {
+		const rule = {
+			name: "ITEM-MIN-QTY-5",
+			price_or_discount: "Discount",
+			discount_type: "Rate",
+			rate_or_discount: 10,
+			min_qty: 5,
+			specificity: 3,
+			priority: 10,
+		};
+		const indexes = buildIndexes({ items: { "ITEM-1": [rule] } });
+		const result = applyLocalPricingRules({
+			item: { item_code: "ITEM-1", qty: 2, stock_qty: 2 },
+			qty: 2,
+			docQty: 5,
+			baseRate: 100,
+			ctx: {},
+			indexes,
+		});
+
+		expect(result.rate).toBe(90);
+		expect(result.applied.map((entry) => entry.name)).toEqual([
+			"ITEM-MIN-QTY-5",
+		]);
+	});
+
+	it("applies the DIS-WATER fixed rate immediately at quantity 25", () => {
+		const rule = {
+			name: "DIS-WATER-QTY-25",
+			price_or_discount: "Price",
+			discount_type: "Rate",
+			rate_or_discount_type: "Rate",
+			rate_or_discount: 15,
+			min_qty: 25,
+			specificity: 3,
+			priority: 10,
+		};
+		const indexes = buildIndexes({ items: { "DIS-WATER": [rule] } });
+
+		const result = applyLocalPricingRules({
+			item: { item_code: "DIS-WATER", qty: 25, stock_qty: 25 },
+			qty: 25,
+			docQty: 25,
+			baseRate: 18,
+			ctx: {},
+			indexes,
+		});
+
+		expect(result.rate).toBe(15);
+		expect(result.discountPerUnit).toBe(3);
+		expect(result.applied.map((entry) => entry.name)).toEqual([
+			"DIS-WATER-QTY-25",
+		]);
 	});
 
 	it("applies amount discounts", () => {
@@ -73,6 +132,39 @@ describe("pricingEngine - applyLocalPricingRules", () => {
 		});
 		expect(result.rate).toBeCloseTo(25);
 		expect(result.discountPerUnit).toBeCloseTo(15);
+	});
+
+	it("applies a UOM-specific rule only to its configured UOM", () => {
+		const rule = {
+			name: "DOZEN-PRICE",
+			price_or_discount: "Price",
+			discount_type: "Rate",
+			rate_or_discount_type: "Rate",
+			rate_or_discount: 960,
+			uom: "Dozen",
+			specificity: 3,
+			priority: 5,
+		};
+		const indexes = buildIndexes({ items: { "ITEM-UOM": [rule] } });
+
+		const dozen = applyLocalPricingRules({
+			item: { item_code: "ITEM-UOM", uom: "Dozen" },
+			qty: 1,
+			baseRate: 1200,
+			ctx: {},
+			indexes,
+		});
+		const unit = applyLocalPricingRules({
+			item: { item_code: "ITEM-UOM", uom: "Unit" },
+			qty: 1,
+			baseRate: 100,
+			ctx: {},
+			indexes,
+		});
+
+		expect(dozen.rate).toBe(960);
+		expect(unit.rate).toBe(100);
+		expect(unit.applied).toHaveLength(0);
 	});
 
 	it("applies margin rules", () => {
@@ -127,6 +219,46 @@ describe("pricingEngine - applyLocalPricingRules", () => {
 		});
 		expect(result.rate).toBeCloseTo(95);
 		expect(result.applied[0].name).toBe("ITEM-RULE");
+	});
+
+	it("preserves store-preordered pricing candidates without changing precedence", () => {
+		const itemRule = {
+			name: "ITEM-FIRST",
+			price_or_discount: "Discount",
+			discount_type: "Amount",
+			rate_or_discount: 5,
+			specificity: 3,
+			priority: 5,
+		};
+		const groupRule = {
+			name: "GROUP-SECOND",
+			price_or_discount: "Discount",
+			discount_type: "Rate",
+			rate_or_discount: 10,
+			specificity: 2,
+			priority: 20,
+		};
+		const indexes = {
+			...buildIndexes({
+				items: { "ITEM-PRESORTED": [itemRule] },
+				groups: { Accessories: [groupRule] },
+			}),
+			preSorted: true,
+		};
+
+		const result = applyLocalPricingRules({
+			item: {
+				item_code: "ITEM-PRESORTED",
+				item_group: "Accessories",
+			},
+			qty: 1,
+			baseRate: 100,
+			ctx: {},
+			indexes,
+		});
+
+		expect(result.rate).toBeCloseTo(95);
+		expect(result.applied[0].name).toBe("ITEM-FIRST");
 	});
 
 	it("selects slab based on quantity", () => {
@@ -358,6 +490,75 @@ describe("pricingEngine - computeFreeItems", () => {
 		expect(freebies[0].uom).toBe("Nos");
 	});
 
+	it("does not return transaction freebies below the minimum amount", () => {
+		const rule = {
+			name: "FREE-MIN-AMT",
+			is_free_item_rule: 1,
+			price_or_discount: "Product",
+			apply_on: "Transaction",
+			min_amt: 100,
+			free_qty: 1,
+			specificity: 0,
+			priority: 5,
+			free_item: "BONUS",
+		};
+		const indexes = buildIndexes({ general: [rule] });
+
+		const belowMinimum = evaluateTransactionPricingRules({
+			cartAmount: 40,
+			cartQty: 1,
+			ctx: {},
+			indexes,
+		}).freebies;
+		expect(belowMinimum).toHaveLength(0);
+
+		const qualified = evaluateTransactionPricingRules({
+			cartAmount: 120,
+			cartQty: 1,
+			ctx: {},
+			indexes,
+		}).freebies;
+		expect(qualified).toHaveLength(1);
+		expect(qualified[0].item_code).toBe("BONUS");
+	});
+
+	it("does not apply item pricing rules below the minimum line amount", () => {
+		const rule = {
+			name: "DISC-MIN-AMT",
+			price_or_discount: "Discount",
+			discount_type: "Rate",
+			rate_or_discount: 10,
+			min_amt: 100,
+			specificity: 3,
+			priority: 5,
+		};
+		const indexes = buildIndexes({ items: { "ITEM-AMT": [rule] } });
+
+		const belowMinimum = applyLocalPricingRules({
+			item: { item_code: "ITEM-AMT", qty: 1 },
+			qty: 1,
+			docQty: 1,
+			docAmount: 60,
+			baseRate: 60,
+			ctx: {},
+			indexes,
+		});
+		expect(belowMinimum.rate).toBeCloseTo(60);
+		expect(belowMinimum.applied).toHaveLength(0);
+
+		const qualified = applyLocalPricingRules({
+			item: { item_code: "ITEM-AMT", qty: 2 },
+			qty: 2,
+			docQty: 2,
+			docAmount: 120,
+			baseRate: 60,
+			ctx: {},
+			indexes,
+		});
+		expect(qualified.rate).toBeCloseTo(54);
+		expect(qualified.applied[0].name).toBe("DISC-MIN-AMT");
+	});
+
 	it("skips freebies outside date range", () => {
 		const rule = {
 			name: "FREE-DATE",
@@ -411,5 +612,66 @@ describe("pricingEngine - computeFreeItems", () => {
 		expect(freeLine.discount_amount).toBe(15);
 		expect(freeLine.base_discount_amount).toBe(15);
 		expect(freeLine.discount_percentage).toBeCloseTo(37.5);
+	});
+
+	it("applies a transaction fixed discount once to the whole cart", () => {
+		const rule = {
+			name: "TXN-AMOUNT-20",
+			apply_on: "Transaction",
+			price_or_discount: "Price",
+			discount_type: "Amount",
+			rate_or_discount_type: "Discount Amount",
+			rate_or_discount: 20,
+			min_amt: 100,
+			specificity: 0,
+			priority: 10,
+		};
+		const indexes = buildIndexes({ general: [rule] });
+
+		const result = evaluateTransactionPricingRules({
+			cartAmount: 150,
+			cartQty: 4,
+			ctx: {},
+			indexes,
+		});
+
+		expect(result.pricing.rate).toBe(130);
+		expect(result.pricing.discountPerUnit).toBe(20);
+		expect(result.pricing.applied.map((entry) => entry.name)).toEqual([
+			"TXN-AMOUNT-20",
+		]);
+	});
+
+	it("uses cart totals for transaction quantity and amount thresholds", () => {
+		const rule = {
+			name: "TXN-PERCENT-10",
+			apply_on: "Transaction",
+			price_or_discount: "Price",
+			discount_type: "Rate",
+			rate_or_discount_type: "Discount Percentage",
+			rate_or_discount: 10,
+			min_qty: 3,
+			min_amt: 100,
+			specificity: 0,
+			priority: 10,
+		};
+		const indexes = buildIndexes({ general: [rule] });
+
+		const below = evaluateTransactionPricingRules({
+			cartAmount: 90,
+			cartQty: 3,
+			ctx: {},
+			indexes,
+		});
+		const qualified = evaluateTransactionPricingRules({
+			cartAmount: 120,
+			cartQty: 3,
+			ctx: {},
+			indexes,
+		});
+
+		expect(below.pricing.applied).toHaveLength(0);
+		expect(qualified.pricing.rate).toBe(108);
+		expect(qualified.pricing.discountPerUnit).toBe(12);
 	});
 });

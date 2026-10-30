@@ -57,12 +57,19 @@ describe("bundle version activation", () => {
 	it("refreshes service worker caches and clears the pending version after activation", async () => {
 		recordPendingBundleActivation("build-2000");
 
-		const postMessage = vi.fn((_message, ports: MessagePort[]) => {
-			ports[0].postMessage({
-				type: "SW_VERSION_INFO",
-				version: "build-2000",
-				timestamp: 2000,
-			});
+		const postMessage = vi.fn((message, ports: MessagePort[]) => {
+			ports[0].postMessage(
+				message.type === "ACK_CACHE_HEALTH"
+					? {
+						type: "SW_CACHE_HEALTH_ACK",
+						version: "build-2000",
+					}
+					: {
+						type: "SW_VERSION_INFO",
+						version: "build-2000",
+						timestamp: 2000,
+					},
+			);
 		});
 
 		Object.defineProperty(window.navigator, "serviceWorker", {
@@ -75,10 +82,39 @@ describe("bundle version activation", () => {
 		});
 
 		await expect(finalizePendingBundleActivation()).resolves.toBe(true);
-		expect(postMessage).toHaveBeenCalledTimes(1);
+		expect(postMessage).toHaveBeenCalledTimes(2);
+		expect(postMessage.mock.calls[1][0]).toEqual({
+			type: "ACK_CACHE_HEALTH",
+			version: "build-2000",
+		});
 		expect(
 			window.sessionStorage.getItem("posa_pending_bundle_activation"),
 		).toBeNull();
+	});
+
+	it("retains the pending version and rollback cache until health is acknowledged", async () => {
+		recordPendingBundleActivation("build-2000");
+
+		const postMessage = vi.fn((message, ports: MessagePort[]) => {
+			if (message.type === "REFRESH_CACHE_VERSION") {
+				ports[0].postMessage({
+					type: "SW_VERSION_INFO",
+					version: "build-2000",
+				});
+			}
+		});
+		Object.defineProperty(window.navigator, "serviceWorker", {
+			configurable: true,
+			value: { controller: { postMessage } },
+		});
+
+		const completion = finalizePendingBundleActivation(10);
+		await expect(completion).resolves.toBe(false);
+
+		expect(postMessage).toHaveBeenCalledTimes(2);
+		expect(
+			window.sessionStorage.getItem("posa_pending_bundle_activation"),
+		).toBe("build-2000");
 	});
 
 	it("keeps the pending version when service worker refresh does not confirm activation", async () => {

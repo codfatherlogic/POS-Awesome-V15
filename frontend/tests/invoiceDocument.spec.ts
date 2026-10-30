@@ -27,6 +27,7 @@ describe("get_invoice_doc", () => {
 				company: "Test Company",
 				name: "Main POS",
 				currency: "PKR",
+				ignore_pricing_rule: 1,
 				payments: [{ mode_of_payment: "Cash", account: "Cash", type: "Cash", default: 1 }],
 			},
 			selected_currency: "PKR",
@@ -67,6 +68,7 @@ describe("get_invoice_doc", () => {
 
 		expect(doc.customer).toBe("CUST-NEW");
 		expect(doc.customer_name).toBe("New Customer");
+		expect(doc.ignore_pricing_rule).toBe(1);
 	});
 
 	it("clears stale party details when customer changes on a reused source doc", () => {
@@ -193,5 +195,58 @@ describe("get_invoice_doc", () => {
 		expect(doc.shipping_address_name).toBeNull();
 		expect(doc.contact_person).toBeNull();
 		expect(doc.territory).toBeNull();
+	});
+
+	it("marks backdated invoices to preserve the selected posting date on submit", () => {
+		(globalThis as any).frappe = {
+			datetime: {
+				nowdate: () => "2026-03-28",
+			},
+		};
+
+		const context: any = {
+			invoiceType: "Invoice",
+			pos_profile: {
+				company: "Test Company",
+				name: "Main POS",
+				currency: "PKR",
+				payments: [{ mode_of_payment: "Cash", account: "Cash", type: "Cash", default: 1 }],
+			},
+			selected_currency: "PKR",
+			conversion_rate: 1,
+			company: { default_currency: "PKR" },
+			price_list_currency: "PKR",
+			get_price_list: () => "Standard Selling",
+			customer_info: {
+				customer: "CUST-001",
+				customer_name: "Walk-in Customer",
+			},
+			customer: "CUST-001",
+			isReturnInvoice: false,
+			items: [],
+			packed_items: [],
+			Total: 0,
+			subtotal: 0,
+			additional_discount: 0,
+			additional_discount_percentage: 0,
+			roundAmount: (value: number) => value,
+			pos_opening_shift: { name: "SHIFT-1" },
+			posa_offers: [],
+			posa_coupons: [],
+			selected_delivery_charge: null,
+			delivery_charges_rate: 0,
+			posting_date_display: "2026-03-20",
+			posting_date: "2026-03-20",
+			formatDateForBackend: (value: string) => value,
+			invoice_doc: {
+				payments: [],
+				taxes: [],
+			},
+		};
+
+		const doc = get_invoice_doc(context);
+
+		expect(doc.posting_date).toBe("2026-03-20");
+		expect(doc.set_posting_time).toBe(1);
 	});
 });

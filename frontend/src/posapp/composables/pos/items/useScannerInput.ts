@@ -8,8 +8,6 @@ import {
 } from "../../../utils/scaleBarcode.js";
 import {
 	getScanTimestamp,
-	sanitizeClipboardText,
-	isScanCandidate,
 	isLikelyKeyboardScan,
 	isSearchFieldPrimedForScan,
 } from "../../../utils/keyboardScan.js";
@@ -18,6 +16,7 @@ import {
 	perfMarkEnd,
 	scheduleFrame,
 } from "../../../utils/perf.js";
+import { classifyClipboardScanText } from "./scannerInput/clipboardScan";
 
 declare const frappe: any;
 declare const __: (_str: string, _args?: any[]) => string;
@@ -72,6 +71,7 @@ export function useScannerInput(options: ScannerInputOptions = {}) {
 	const scanAudioContext = ref<AudioContext | null>(null);
 	const scanDebounceId = ref<any>(null);
 	const scanQueuedCode = ref("");
+	const activeScanCodes = new Set<string>();
 
 	// Keyboard Scan Detection State
 	const keyboardScanBuffer = ref("");
@@ -271,6 +271,14 @@ export function useScannerInput(options: ScannerInputOptions = {}) {
 	// --- Main Scan Handler ---
 	const onBarcodeScanned = (scannedCode: string) => {
 		resetKeyboardScanDetection();
+		const normalizedCode = String(scannedCode || "").trim();
+		if (!normalizedCode) return;
+		if (
+			scanQueuedCode.value === normalizedCode ||
+			activeScanCodes.has(normalizedCode)
+		) {
+			return;
+		}
 
 		if (scannerLocked.value) {
 			playScanTone("error");
@@ -313,17 +321,19 @@ export function useScannerInput(options: ScannerInputOptions = {}) {
 			} catch (error) {
 				handleScanPipelineError(error, code);
 			} finally {
+				activeScanCodes.delete(code);
 				perfMarkEnd("pos:scan-handler", mark);
 			}
 		};
 
 		if (scanDebounceId.value) clearTimeout(scanDebounceId.value);
-		scanQueuedCode.value = scannedCode;
+		scanQueuedCode.value = normalizedCode;
 
 		scanDebounceId.value = setTimeout(() => {
 			scanDebounceId.value = null;
-			const code = scanQueuedCode.value || scannedCode;
+			const code = scanQueuedCode.value || normalizedCode;
 			scanQueuedCode.value = "";
+			activeScanCodes.add(code);
 
 			scheduleFrame(() => {
 				const maybePromise = runScanPipeline(code);
@@ -509,19 +519,20 @@ export function useScannerInput(options: ScannerInputOptions = {}) {
 		const pastedText = event.clipboardData.getData("text");
 		if (!pastedText) return;
 
-		const sanitized = sanitizeClipboardText(pastedText);
-		if (!sanitized) {
+		const pasteScan = classifyClipboardScanText(
+			pastedText,
+			keyboardScanMinLength,
+		);
+		if (pasteScan.shouldPreventDefault) {
 			event.preventDefault();
-			return;
 		}
 
-		if (isScanCandidate(sanitized, keyboardScanMinLength)) {
-			event.preventDefault();
+		if (pasteScan.shouldScan) {
 			if (setSearchInputHandler.value)
-				(setSearchInputHandler.value as any)(sanitized);
+				(setSearchInputHandler.value as any)(pasteScan.sanitizedText);
 
 			nextTick(() => {
-				onBarcodeScanned(sanitized);
+				onBarcodeScanned(pasteScan.sanitizedText);
 			});
 		}
 	};

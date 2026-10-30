@@ -1,3 +1,4 @@
+import "./browserCompatibility";
 import "./toConsole";
-import "./posapp/posapp";
+export * from "./posapp/posapp";
 import "./utils/clearAllCaches";

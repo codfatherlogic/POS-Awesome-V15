@@ -33,7 +33,12 @@ import {
 	scheduleChunkRecoveryStateReset,
 } from "./utils/chunkLoadRecovery";
 import { finalizePendingBundleActivation } from "./utils/bundleVersionActivation";
-import "../sw-updater"; // Initialize service worker auto-updater
+import { reconcileBuildChangeOnStartup } from "./utils/buildCacheReconciler";
+import {
+	startupInitPromise,
+	isOffline,
+	registerPostHydrationTask,
+} from "../offline";
 import App from "./App.vue";
 // @ts-ignore
 import {
@@ -41,6 +46,13 @@ import {
 	initLongTaskObserver,
 	isPerfEnabled,
 } from "./utils/perf.js";
+import {
+	finishStartupPhase,
+	startStartupPhase,
+	traceStartupEvent,
+} from "../utils/startupTrace";
+
+declare const __BUILD_VERSION__: string;
 
 attachProfilerHelpers();
 
@@ -55,23 +67,195 @@ if (typeof frappe === "undefined") {
 	frappe.provide("frappe.PosApp");
 }
 
-frappe.PosApp.posapp = class {
+export async function initPosStorage() {
+	const phase = startStartupPhase("indexeddb.boot_critical_storage");
+	try {
+		await startupInitPromise;
+		finishStartupPhase(phase, "ok");
+	} catch (error) {
+		finishStartupPhase(phase, "error", { error });
+		throw error;
+	}
+}
+
+function getPosBuildVersion() {
+	return typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : null;
+}
+
+let buildReconciliationChain: Promise<unknown> = Promise.resolve();
+
+function queueBuildReconciliation(deferInitialBaseline: boolean) {
+	const reconcile = async () =>
+		await reconcileBuildChangeOnStartup({
+			runtimeBuildVersion: getPosBuildVersion(),
+			isOnline: !isOffline(),
+			deferInitialBaseline,
+		});
+	buildReconciliationChain = buildReconciliationChain.then(
+		reconcile,
+		reconcile,
+	);
+	return buildReconciliationChain;
+}
+
+const POS_INPUT_HELPER_SELECTOR = "input, textarea";
+
+function suppressBrowserInputHelpers(root: HTMLElement | null | undefined) {
+	if (
+		!root ||
+		typeof window === "undefined" ||
+		typeof MutationObserver === "undefined"
+	) {
+		return () => {};
+	}
+
+	const normalizeInput = (element: Element | null) => {
+		if (
+			!(
+				element instanceof HTMLInputElement ||
+				element instanceof HTMLTextAreaElement
+			)
+		) {
+			return;
+		}
+		if (
+			element.type === "file" ||
+			element.dataset.posAllowBrowserHelpers === "true"
+		) {
+			return;
+		}
+		if (!element.hasAttribute("autocomplete")) {
+			element.setAttribute("autocomplete", "off");
+		}
+		element.setAttribute("autocorrect", "off");
+		element.setAttribute("autocapitalize", "off");
+		element.setAttribute("spellcheck", "false");
+		element.setAttribute("data-1p-ignore", "true");
+		element.setAttribute("data-lpignore", "true");
+		element.setAttribute("data-bwignore", "true");
+	};
+
+	const normalizeTree = (node: ParentNode | Element | null) => {
+		if (!node) return;
+		if (node instanceof Element) {
+			normalizeInput(node);
+		}
+		node.querySelectorAll?.(POS_INPUT_HELPER_SELECTOR).forEach(
+			normalizeInput,
+		);
+	};
+
+	const handleFocusIn = (event: Event) => {
+		normalizeInput(event.target as Element | null);
+	};
+
+	normalizeTree(root);
+	const observer = new MutationObserver((mutations) => {
+		mutations.forEach((mutation) => {
+			mutation.addedNodes.forEach((node) => {
+				if (node instanceof Element) {
+					normalizeTree(node);
+				}
+			});
+		});
+	});
+	observer.observe(root, { childList: true, subtree: true });
+	root.addEventListener("focusin", handleFocusIn, true);
+
+	return () => {
+		observer.disconnect();
+		root.removeEventListener("focusin", handleFocusIn, true);
+	};
+}
+
+registerPostHydrationTask(async () => {
+	await queueBuildReconciliation(false);
+});
+
+export async function runPosBootSync() {
+	await queueBuildReconciliation(true);
+}
+
+async function startOptionalRuntimeServices() {
+	const servicesPhase = startStartupPhase("optional_runtime_services");
+	const socketStore = useSocketStore();
+	socketStore.init();
+
+	await import("../sw-updater").catch((error) => {
+		console.warn("Failed to initialize POS service worker updater", error);
+	});
+
+	if (!document.querySelector('link[rel="manifest"]')) {
+		const link = document.createElement("link");
+		link.rel = "manifest";
+		link.href = "/manifest.json";
+		document.head.appendChild(link);
+	}
+
+	if (
+		("serviceWorker" in navigator &&
+			window.location.protocol === "https:") ||
+		window.location.hostname === "localhost" ||
+		window.location.hostname === "127.0.0.1"
+	) {
+		const swPhase = startStartupPhase("service_worker.registration", {
+			hasController: Boolean(navigator.serviceWorker.controller),
+		});
+		// Register at `/sw.js?v=<build>` so a new build forces a fresh
+		// SW registration. The sw.js bytes are stable across deploys
+		// (the file reads version.json at runtime), so without a
+		// per-build URL discriminator the browser keeps the old SW
+		// instance serving its old precache. Symptom in the field:
+		// "POS won't let me add items" — the operator sees the new
+		// Pinia store hooked up to the OLD bundle's DOM. Frappe drops
+		// the query string for static files, so the served bytes are
+		// identical; only the registration scope key differs.
+		const swBuildVersion =
+			typeof __BUILD_VERSION__ !== "undefined" ? __BUILD_VERSION__ : "";
+		const swUrl = swBuildVersion
+			? `/sw.js?v=${encodeURIComponent(swBuildVersion)}`
+			: "/sw.js";
+		navigator.serviceWorker
+			.register(swUrl)
+			.then((registration) => {
+				console.log("SW registered successfully", registration);
+				finishStartupPhase(swPhase, "ok", {
+					active: Boolean(registration.active),
+					waiting: Boolean(registration.waiting),
+				});
+			})
+			.catch((err) => {
+				finishStartupPhase(swPhase, "error", { error: err });
+				console.error("SW registration failed", err);
+			});
+	}
+	finishStartupPhase(servicesPhase, "ok");
+}
+
+class PosAppController {
 	$parent: any;
 	page: any;
 	app: any;
 	router: any;
 	routerHistory: any;
 	$el: any;
+	inputHelperCleanup: (() => void) | null;
 
-	constructor({ parent }: { parent: any }) {
+	constructor(input: any) {
+		const parent = input?.parent || input;
 		this.$parent = $(document);
 		this.page = parent?.page || parent;
 		this.app = null;
+		this.inputHelperCleanup = null;
 		this.make_body();
 	}
 
 	make_body() {
 		this.$el = this.$parent.find(".main-section");
+	}
+
+	async initializeApp() {
+		const phase = startStartupPhase("frappe.vue_app_mount");
 		// Vuetify instance is now imported from plugins/vuetify.ts
 		this.app = createApp(App);
 		const { router, history } = createPosAppRouter();
@@ -108,46 +292,42 @@ frappe.PosApp.posapp = class {
 		installGlobalErrorHandlers(this.app);
 
 		this.app.mount(this.$el[0]);
+		traceStartupEvent(
+			"frappe.app_shell_visible",
+			"ok",
+			{
+				route: window.location.pathname,
+			},
+			performance.now(),
+		);
+		traceStartupEvent(
+			"frappe.page.bootstrap",
+			"ok",
+			{ readyState: document.readyState },
+			performance.now(),
+		);
+		this.inputHelperCleanup = suppressBrowserInputHelpers(this.$el[0]);
 		clearChunkRecoveryState();
 		void this.router.isReady().finally(() => {
 			scheduleChunkRecoveryStateReset();
 			scheduleAfterStableBoot(() => {
 				void finalizePendingBundleActivation();
+				void startOptionalRuntimeServices();
 			});
 		});
-
-		// Initialize socket listeners
-		const socketStore = useSocketStore();
-		socketStore.init();
 
 		if (isPerfEnabled()) {
 			initLongTaskObserver("posapp");
 		}
 
-		if (!document.querySelector('link[rel="manifest"]')) {
-			const link = document.createElement("link");
-			link.rel = "manifest";
-			link.href = "/manifest.json";
-			document.head.appendChild(link);
-		}
-
-		if (
-			("serviceWorker" in navigator &&
-				window.location.protocol === "https:") ||
-			window.location.hostname === "localhost" ||
-			window.location.hostname === "127.0.0.1"
-		) {
-			navigator.serviceWorker
-				.register("/sw.js")
-				.then((registration) => {
-					console.log("SW registered successfully", registration);
-				})
-				.catch((err) => console.error("SW registration failed", err));
-		}
+		finishStartupPhase(phase, "ok");
+		return this;
 	}
 
 	unmount() {
 		if (this.app) {
+			this.inputHelperCleanup?.();
+			this.inputHelperCleanup = null;
 			// Clean up router to prevent global navigation interference
 			if (this.router) {
 				// Remove all route guards and listeners
@@ -178,4 +358,24 @@ frappe.PosApp.posapp = class {
 	}
 
 	setup_header() {}
+}
+
+export async function mountPosApp(pageRef: any) {
+	if (pageRef?.$PosApp) {
+		return pageRef.$PosApp;
+	}
+
+	const instance = new PosAppController(pageRef);
+	await instance.initializeApp();
+	if (pageRef) {
+		pageRef.$PosApp = instance;
+	}
+	return instance;
+}
+
+frappe.PosApp!.posapp = class extends PosAppController {
+	constructor(pageRef: any) {
+		super(pageRef);
+		void this.initializeApp();
+	}
 };

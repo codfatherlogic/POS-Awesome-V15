@@ -1,6 +1,9 @@
 import _ from "lodash";
 import { withPerf } from "../../../utils/perf";
-import { parseBooleanSetting } from "../../../utils/stock";
+import {
+	parseBooleanSetting,
+	shouldBlockSaleForStock,
+} from "../../../utils/stock";
 import { useToastStore } from "../../../stores/toastStore";
 import { useStockUtils } from "../shared/useStockUtils";
 
@@ -10,7 +13,13 @@ import { useItemMerging } from "./addition/useItemMerging";
 import { useItemCreation } from "./addition/useItemCreation";
 import { useItemBatchSerial } from "./addition/useItemBatchSerial";
 import { useItemBundles } from "./addition/useItemBundles";
+import { collectUsedSerialsForItem } from "./addition/serialSelection";
 import { useBatchSerial } from "../shared/useBatchSerial";
+import { getRequiredStockQuantity } from "../shared/batchSerialValidation";
+import {
+	allocateBatchStockQty,
+	getItemConversionFactor,
+} from "../shared/batchAllocation";
 
 declare const __: (_text: string, _args?: any[]) => string;
 declare const frappe: any;
@@ -39,8 +48,17 @@ export function useItemAddition() {
 	const { expandBundle } = useItemBundles() as any;
 	const sharedBatchSerial = useBatchSerial();
 	const logBatchFlow = (message: string, payload?: any) => {
-		console.debug(`[POS BatchFlow] ${message}`, payload || {});
+		if ((globalThis as any).__POSAWESOME_DEBUG_BATCH_FLOW__ === true) {
+			console.debug(`[POS BatchFlow] ${message}`, payload || {});
+		}
 	};
+	const toFiniteNumber = (value: any, fallback = 0) => {
+		const numeric = Number(value);
+		return Number.isFinite(numeric) ? numeric : fallback;
+	};
+	const qtyOrOne = (value: any) => toFiniteNumber(value, 0) || 1;
+	const newItemInsertIndex = (context: any) =>
+		context?.appendNewItems ? -1 : 0;
 
 	const callSetBatchQty = (
 		context: any,
@@ -67,6 +85,33 @@ export function useItemAddition() {
 		return sharedBatchSerial.setSerialNo(item, context);
 	};
 
+	const updateLineAmounts = (line: any, context: any) => {
+		if (!line) return;
+		const toNumber = (value: any) => {
+			const parsed = Number.parseFloat(String(value ?? 0));
+			return Number.isFinite(parsed) ? parsed : 0;
+		};
+		const round =
+			typeof context?.flt === "function"
+				? context.flt
+				: (value: any) => toNumber(value);
+		const precision = Number.isFinite(Number(context?.currency_precision))
+			? Number(context.currency_precision)
+			: undefined;
+		const qty = toNumber(line.qty);
+		const rate = toNumber(line.rate);
+		const baseRate = toNumber(line.base_rate ?? line.rate);
+		line.amount = round(qty * rate, precision);
+		line.base_amount = round(qty * baseRate, precision);
+	};
+
+	const canMergeWithTarget = (context: any, target: any) => {
+		if (!target) return false;
+		const qty = Number.parseFloat(String(target.qty ?? 0));
+		if (!Number.isFinite(qty) || qty === 0) return false;
+		return context?.isReturnInvoice ? qty < 0 : qty > 0;
+	};
+
 	const getBatchAvailabilityForItem = (context: any, item: any) => {
 		if (typeof context?.getBatchAvailability === "function") {
 			return context.getBatchAvailability(item, context);
@@ -78,46 +123,23 @@ export function useItemAddition() {
 	};
 
 	const getRequestedSerialQty = (item: any) => {
-		const parsedQty = Number(item?.qty);
-		const absQty = Number.isFinite(parsedQty) ? Math.abs(Math.trunc(parsedQty)) : 0;
-		return Math.max(absQty, 1);
-	};
-
-	const collectUsedSerials = (item: any, context: any) => {
-		const used = new Set<string>();
-		const lines = Array.isArray(context?.items) ? context.items : [];
-
-		lines.forEach((line: any) => {
-			if (!line || line.posa_row_id === item?.posa_row_id) return;
-			if (line.item_code !== item?.item_code) return;
-			if (item?.has_batch_no && item?.batch_no && line.batch_no && line.batch_no !== item.batch_no) {
-				return;
-			}
-
-			if (Array.isArray(line.serial_no_selected)) {
-				line.serial_no_selected.forEach((serial: any) => {
-					const normalized = String(serial || "").trim();
-					if (normalized) used.add(normalized);
-				});
-				return;
-			}
-
-			if (line.serial_no) {
-				String(line.serial_no)
-					.split("\n")
-					.map((serial) => String(serial || "").trim())
-					.filter(Boolean)
-					.forEach((serial) => used.add(serial));
-			}
-		});
-
-		return used;
+		const stockQty = getRequiredStockQuantity(item);
+		return Math.max(
+			Number.isFinite(stockQty) ? Math.trunc(stockQty) : 0,
+			1,
+		);
 	};
 
 	const autoAssignSerials = (item: any, context: any) => {
 		if (!item?.has_serial_no) return;
+		if (item._batch_serial_assignment_source === "manual") {
+			callSetSerialNo(context, item);
+			return;
+		}
 
-		const serialRows = Array.isArray(item.serial_no_data) ? item.serial_no_data : [];
+		const serialRows = Array.isArray(item.serial_no_data)
+			? item.serial_no_data
+			: [];
 		if (!serialRows.length) {
 			callSetSerialNo(context, item);
 			return;
@@ -140,7 +162,7 @@ export function useItemAddition() {
 			return;
 		}
 
-		const usedSerials = collectUsedSerials(item, context);
+		const usedSerials = collectUsedSerialsForItem(item, context);
 		item.serial_no_selected.forEach((serial: any) => {
 			const normalized = String(serial || "").trim();
 			if (normalized) usedSerials.add(normalized);
@@ -159,7 +181,9 @@ export function useItemAddition() {
 			});
 
 			if (!item.batch_no) {
-				const batchFromSerial = pickedRows.find((row: any) => row?.batch_no)?.batch_no;
+				const batchFromSerial = pickedRows.find(
+					(row: any) => row?.batch_no,
+				)?.batch_no;
 				if (batchFromSerial) {
 					item.batch_no = batchFromSerial;
 					callSetBatchQty(context, item, batchFromSerial, false);
@@ -227,37 +251,56 @@ export function useItemAddition() {
 
 		// 1. Process Updates
 		for (const [rowId, data] of currentUpdates) {
-			const item = context.invoiceStore.itemsData.get(rowId);
-			if (item) {
-				console.log("[useItemAddition] Merging item qty", {
-					item_code: item.item_code,
-					old_qty: item.qty,
-					added: data.qty,
-				});
-				item.qty += data.qty;
-				calcStockQty(item, item.qty);
+			const applyPendingUpdate = (line: any) => {
+				line.qty = toFiniteNumber(line.qty) + toFiniteNumber(data.qty);
+				calcStockQty(line, line.qty);
 
 				// Handle other updates that happen on merge
-				if (item.has_batch_no && item.batch_no) {
-					callSetBatchQty(context, item, item.batch_no, false);
+				if (line.has_batch_no && line.batch_no) {
+					callSetBatchQty(context, line, line.batch_no, false);
 				}
-				callSetSerialNo(context, item);
+				callSetSerialNo(context, line);
+				updateLineAmounts(line, context);
+			};
+			let item = context.invoiceStore.updateItemWithTotals
+				? context.invoiceStore.updateItemWithTotals(
+						rowId,
+						applyPendingUpdate,
+					)
+				: null;
 
-				// Resolve all promises waiting for this update
-				data.resolvers.forEach((r) => r(item));
+			if (!item) {
+				item =
+					context.items?.find?.(
+						(line: any) => line?.posa_row_id === rowId,
+					) ||
+					context.invoiceStore?.itemsData?.get?.(rowId) ||
+					null;
+				if (item) {
+					applyPendingUpdate(item);
+				}
 			}
+
+			// Resolve all promises waiting for this update, even if the row disappeared.
+			data.resolvers.forEach((r) => r(item));
+		}
+		if (currentUpdates.size && context.invoiceStore?.recalculateTotals) {
+			context.invoiceStore.recalculateTotals();
 		}
 
 		// 2. Process Additions
 		if (currentItems.length) {
-			console.log("[useItemAddition] Adding new items to store", {
-				count: currentItems.length,
-			});
-			const addedItems = context.invoiceStore.addItems(currentItems, 0); // Prepend to top
+			const insertIndex = newItemInsertIndex(context);
+			const existingItemCount = context.items.length;
+			const addedItems = context.invoiceStore.addItems(
+				currentItems,
+				insertIndex,
+			);
+			const firstAddedIndex = insertIndex < 0 ? existingItemCount : 0;
 
 			addedItems.forEach((item, index) => {
 				const resolvers = currentResolvers[index] || []; // Array of resolvers
-				refreshMergeCacheEntry(context, item, 0);
+				refreshMergeCacheEntry(context, item, firstAddedIndex + index);
 				// Benchmark note: Use preloaded batch data to avoid extra fetches on auto-assign.
 				if (shouldAutoSetBatch(context, item)) {
 					callSetBatchQty(context, item, null, false);
@@ -307,10 +350,19 @@ export function useItemAddition() {
 		});
 
 		if (context.invoiceStore) {
-			const added = context.invoiceStore.addItems(splitItems, 0);
-			added.forEach((line: any) => {
-				refreshMergeCacheEntry(context, line, 0);
-				runAsyncTask(() => expandBundle(line, context), "expand_bundle");
+			const insertIndex = newItemInsertIndex(context);
+			const existingItemCount = context.items.length;
+			const added = context.invoiceStore.addItems(
+				splitItems,
+				insertIndex,
+			);
+			const firstAddedIndex = insertIndex < 0 ? existingItemCount : 0;
+			added.forEach((line: any, index: number) => {
+				refreshMergeCacheEntry(context, line, firstAddedIndex + index);
+				runAsyncTask(
+					() => expandBundle(line, context),
+					"expand_bundle",
+				);
 				handleItemExpansion(line, context);
 			});
 			if (context.invoiceStore?.touch) {
@@ -318,9 +370,17 @@ export function useItemAddition() {
 			}
 		} else {
 			splitItems.forEach((line: any) => {
-				context.items.unshift(line);
-				refreshMergeCacheEntry(context, line, 0);
-				runAsyncTask(() => expandBundle(line, context), "expand_bundle");
+				if (context.appendNewItems) context.items.push(line);
+				else context.items.unshift(line);
+				refreshMergeCacheEntry(
+					context,
+					line,
+					context.appendNewItems ? context.items.length - 1 : 0,
+				);
+				runAsyncTask(
+					() => expandBundle(line, context),
+					"expand_bundle",
+				);
 				handleItemExpansion(line, context);
 			});
 		}
@@ -339,68 +399,66 @@ export function useItemAddition() {
 					? context.invoiceType
 					: context?.invoiceType?.value;
 			const deferStockValidationToPayment =
-				currentInvoiceType === "Order" || currentInvoiceType === "Quotation";
+				currentInvoiceType === "Order" ||
+				currentInvoiceType === "Quotation";
 
 			const blockSale = parseBooleanSetting(
 				context.pos_profile?.posa_block_sale_beyond_available_qty,
 			);
-			const allowNegativeStock =
-				parseBooleanSetting(
-					context.stock_settings?.allow_negative_stock,
-				) || parseBooleanSetting(item.allow_negative_stock);
+			const existingItem =
+				findMergeTarget(context, item, false)?.item || null;
+			const compatibleExistingItem = canMergeWithTarget(
+				context,
+				existingItem,
+			)
+				? existingItem
+				: null;
+			const currentQty = Number(compatibleExistingItem?.qty || 0);
+			const requestedQty = Number(item.qty || 1);
+			const conversionFactor = Number(item.conversion_factor || 1);
+			const baseAvailableQty = Number(item._base_actual_qty);
+			const availableQty = Number.isFinite(baseAvailableQty)
+				? baseAvailableQty /
+					(conversionFactor > 0 ? conversionFactor : 1)
+				: item.actual_qty;
+			const stockBlocked = shouldBlockSaleForStock({
+				item,
+				requestedQty: currentQty + requestedQty,
+				availableQty,
+				posProfile: context.pos_profile,
+				stockSettings: context.stock_settings,
+				blockSaleBeyondAvailableQty: blockSale,
+				isReturnInvoice: context.isReturnInvoice,
+				deferStockValidationToPayment,
+			});
 
-			if (
-				!context.isReturnInvoice &&
-				!deferStockValidationToPayment &&
-				blockSale &&
-				item.is_stock_item &&
-				item.actual_qty <= 0 &&
-				!allowNegativeStock
-			) {
+			if (stockBlocked) {
 				console.debug("POS stock gate: item blocked", {
 					item_code: item.item_code,
-					actual_qty: item.actual_qty,
+					available_qty: availableQty,
+					requested_qty: currentQty + requestedQty,
 					block_sale_beyond_available_qty: blockSale,
-					allow_negative_stock: allowNegativeStock,
+					allow_negative_stock: parseBooleanSetting(
+						context.stock_settings?.allow_negative_stock,
+					),
 					item_allow_negative_stock: parseBooleanSetting(
 						item.allow_negative_stock,
 					),
 				});
 				toastStore.show({
-					title: __("Item is out of stock"),
-					detail: __(
-						"Cannot add an item with zero or negative quantity.",
-					),
+					title:
+						Number(availableQty) <= 0
+							? __("Item is out of stock")
+							: __("Quantity exceeds available stock"),
+					detail:
+						Number(availableQty) <= 0
+							? __(
+									"Cannot add an item with zero or negative quantity.",
+								)
+							: undefined,
 					color: "error",
 				});
 				return;
-			}
-
-			if (
-				!context.isReturnInvoice &&
-				!deferStockValidationToPayment &&
-				blockSale &&
-				!allowNegativeStock
-			) {
-				const existingItem =
-					findMergeTarget(context, item, false)?.item ||
-					context.items.find(
-						(i) =>
-							i.item_code === item.item_code &&
-							i.uom === item.uom,
-					);
-				const currentQty = existingItem ? existingItem.qty : 0;
-				const requestedQty = item.qty || 1;
-				const maxQty =
-					item._base_actual_qty / (item.conversion_factor || 1);
-
-				if (currentQty + requestedQty > maxQty) {
-					toastStore.show({
-						title: __("Quantity exceeds available stock"),
-						color: "warning",
-					});
-					return;
-				}
 			}
 
 			if (!item.uom) {
@@ -408,10 +466,22 @@ export function useItemAddition() {
 			}
 			let index = -1;
 			let mergeTarget: any = null;
-			const requireBatchMatch = Boolean(item.has_batch_no);
+			// Keep the initial lookup strict so batch items reach the allocation
+			// block. After allocation, only require a strict match when the probe
+			// actually has a batch; async batch details can otherwise leave an empty
+			// batch key that duplicates an already-batched row.
+			const needsBatchMatch = (probe: any) =>
+				Boolean(probe?.has_batch_no && probe?.batch_no);
 			if (!context.new_line) {
 				// For normal additions (not returns), only merge with existing positive quantity lines
-				mergeTarget = findMergeTarget(context, item, requireBatchMatch);
+				mergeTarget = findMergeTarget(
+					context,
+					item,
+					Boolean(item.has_batch_no),
+				);
+				if (!canMergeWithTarget(context, mergeTarget?.item)) {
+					mergeTarget = null;
+				}
 				index = mergeTarget ? mergeTarget.index : -1;
 			}
 
@@ -431,17 +501,21 @@ export function useItemAddition() {
 					new_item.batch_no = item.to_set_batch_no;
 					item.to_set_batch_no = null;
 					item.batch_no = null;
-					callSetBatchQty(context, new_item, new_item.batch_no, false);
+					callSetBatchQty(
+						context,
+						new_item,
+						new_item.batch_no,
+						false,
+					);
 				}
 				const extra_items: any[] = [];
-				const requestedQtyForBatching = Math.abs(
-					Number(new_item.qty || 0),
-				);
+				const requestedStockQtyForBatching =
+					getRequiredStockQuantity(new_item);
 				const shouldAllocateAcrossBatches =
 					new_item.has_batch_no &&
 					!new_item.batch_no &&
 					(shouldAutoSetBatch(context, new_item) ||
-						requestedQtyForBatching > 1);
+						requestedStockQtyForBatching > 1);
 
 				if (shouldAllocateAcrossBatches) {
 					// Get sorted availability (taking existing cart items into account)
@@ -459,51 +533,33 @@ export function useItemAddition() {
 						// Fallback to standard behavior (likely picks first or none)
 						callSetBatchQty(context, new_item, null, false);
 					} else {
-						let remaining_qty = new_item.qty;
-
-						const allocations: Array<{ batch: any; qty: number }> =
-							[];
-
-						for (const batch of usable_batches) {
-							if (remaining_qty <= 0) break;
-							const take = Math.min(
-								remaining_qty,
-								batch.available_qty,
-							);
-							if (take <= 0) continue;
-							allocations.push({
-								batch: batch.batch_no,
-								qty: take,
-							});
-							remaining_qty -= take;
-						}
+						const allocationResult = allocateBatchStockQty(
+							usable_batches,
+							requestedStockQtyForBatching,
+						);
+						const conversionFactor =
+							getItemConversionFactor(new_item);
+						const allocations = allocationResult.allocations.map(
+							(allocation) => ({
+								batch: allocation.batchNo,
+								qty: allocation.stockQty / conversionFactor,
+							}),
+						);
+						const remaining_qty =
+							allocationResult.unallocatedStockQty;
 						logBatchFlow("Batch allocation prepared", {
 							item_code: new_item.item_code,
 							requested_qty: new_item.qty,
+							requested_stock_qty: requestedStockQtyForBatching,
 							allocations,
-							remaining_qty,
+							unallocated_stock_qty: remaining_qty,
 						});
 
-						// If we still have remainder but ran out of batches, add it to the last allocation
+						// Never over-allocate a batch. Keeping the original line intact lets
+						// stock validation report stale/insufficient batch data accurately.
 						if (remaining_qty > 0) {
-							if (allocations.length > 0) {
-								const lastAllocation =
-									allocations[allocations.length - 1];
-								if (lastAllocation) {
-									lastAllocation.qty += remaining_qty;
-									logBatchFlow(
-										"Insufficient batch availability, keeping remainder on last allocation",
-										{
-											item_code: new_item.item_code,
-											remainder: remaining_qty,
-											last_batch: lastAllocation.batch,
-										},
-									);
-								}
-							} else {
-								// No usable batches found? Just use standard logic
-								callSetBatchQty(context, new_item, null, false);
-							}
+							allocations.length = 0;
+							callSetBatchQty(context, new_item, null, false);
 						}
 
 						if (allocations.length > 0) {
@@ -581,8 +637,11 @@ export function useItemAddition() {
 					mergeTarget = findMergeTarget(
 						context,
 						mergeProbeItem,
-						requireBatchMatch,
+						needsBatchMatch(mergeProbeItem),
 					);
+					if (!canMergeWithTarget(context, mergeTarget?.item)) {
+						mergeTarget = null;
+					}
 					index = mergeTarget ? mergeTarget.index : -1;
 					logBatchFlow("Re-check merge target", {
 						item_code: mergeProbeItem?.item_code,
@@ -599,7 +658,8 @@ export function useItemAddition() {
 							toQueue.forEach((line, lineIndex) => {
 								const pendingIndex = pendingItems.findIndex(
 									(pendingItem) =>
-										pendingItem.item_code === line.item_code &&
+										pendingItem.item_code ===
+											line.item_code &&
 										pendingItem.uom === line.uom &&
 										pendingItem.rate === line.rate &&
 										(pendingItem.batch_no || "") ===
@@ -607,15 +667,21 @@ export function useItemAddition() {
 								);
 
 								if (pendingIndex !== -1 && !context.new_line) {
-									const pendingItem = pendingItems[pendingIndex];
+									const pendingItem =
+										pendingItems[pendingIndex];
 									if (context.isReturnInvoice) {
-										pendingItem.qty -= Math.abs(line.qty || 1);
+										pendingItem.qty =
+											toFiniteNumber(pendingItem.qty) -
+											Math.abs(qtyOrOne(line.qty));
 									} else {
-										pendingItem.qty += line.qty || 1;
+										pendingItem.qty =
+											toFiniteNumber(pendingItem.qty) +
+											qtyOrOne(line.qty);
 									}
 									if (lineIndex === 0) {
 										const existingResolvers =
-											pendingResolvers[pendingIndex] || [];
+											pendingResolvers[pendingIndex] ||
+											[];
 										existingResolvers.push(resolve);
 										pendingResolvers[pendingIndex] =
 											existingResolvers;
@@ -636,8 +702,16 @@ export function useItemAddition() {
 							}
 						});
 					} else {
-						context.items.unshift(new_item);
-						refreshMergeCacheEntry(context, new_item, 0);
+						if (context.appendNewItems)
+							context.items.push(new_item);
+						else context.items.unshift(new_item);
+						refreshMergeCacheEntry(
+							context,
+							new_item,
+							context.appendNewItems
+								? context.items.length - 1
+								: 0,
+						);
 						runAsyncTask(
 							() => expandBundle(new_item, context),
 							"expand_bundle",
@@ -645,14 +719,18 @@ export function useItemAddition() {
 
 						// Handle extra items from batch splitting
 						if (extra_items && extra_items.length > 0) {
-							console.log(
-								"[useItemAddition] Adding split batch items",
-								extra_items.length,
-							);
 							extra_items.forEach((split_item) => {
-								context.items.unshift(split_item);
+								if (context.appendNewItems)
+									context.items.push(split_item);
+								else context.items.unshift(split_item);
 								// Replicate basic setup for split items
-								refreshMergeCacheEntry(context, split_item, 0);
+								refreshMergeCacheEntry(
+									context,
+									split_item,
+									context.appendNewItems
+										? context.items.length - 1
+										: 0,
+								);
 								runAsyncTask(
 									() => expandBundle(split_item, context),
 									"expand_bundle",
@@ -684,8 +762,8 @@ export function useItemAddition() {
 					// Existing item update
 					const cur_item = context.items[index];
 					const qtyDelta = context.isReturnInvoice
-						? -Math.abs(new_item.qty || 1)
-						: new_item.qty || 1;
+						? -Math.abs(qtyOrOne(new_item.qty))
+						: qtyOrOne(new_item.qty);
 
 					if (context.invoiceStore) {
 						// Use batching for updates
@@ -694,7 +772,7 @@ export function useItemAddition() {
 							if (pendingUpdates.has(rowId)) {
 								const data = pendingUpdates.get(rowId);
 								if (!data) return;
-								data.qty += qtyDelta;
+								data.qty = toFiniteNumber(data.qty) + qtyDelta;
 								data.resolvers.push(resolve);
 							} else {
 								pendingUpdates.set(rowId, {
@@ -728,18 +806,33 @@ export function useItemAddition() {
 								extra_items.forEach((splitLine) => {
 									const pendingIndex = pendingItems.findIndex(
 										(pendingItem) =>
-											pendingItem.item_code === splitLine.item_code &&
+											pendingItem.item_code ===
+												splitLine.item_code &&
 											pendingItem.uom === splitLine.uom &&
-											pendingItem.rate === splitLine.rate &&
+											pendingItem.rate ===
+												splitLine.rate &&
 											(pendingItem.batch_no || "") ===
 												(splitLine.batch_no || ""),
 									);
-									if (pendingIndex !== -1 && !context.new_line) {
-										const pendingItem = pendingItems[pendingIndex];
+									if (
+										pendingIndex !== -1 &&
+										!context.new_line
+									) {
+										const pendingItem =
+											pendingItems[pendingIndex];
 										if (context.isReturnInvoice) {
-											pendingItem.qty -= Math.abs(splitLine.qty || 1);
+											pendingItem.qty =
+												toFiniteNumber(
+													pendingItem.qty,
+												) -
+												Math.abs(
+													qtyOrOne(splitLine.qty),
+												);
 										} else {
-											pendingItem.qty += splitLine.qty || 1;
+											pendingItem.qty =
+												toFiniteNumber(
+													pendingItem.qty,
+												) + qtyOrOne(splitLine.qty);
 										}
 									} else {
 										pendingItems.push(splitLine);
@@ -775,14 +868,11 @@ export function useItemAddition() {
 							}
 						});
 					}
-					cur_item.qty += qtyDelta;
+					cur_item.qty = toFiniteNumber(cur_item.qty) + qtyDelta;
 
 					calcStockQty(cur_item, cur_item.qty);
 
-					if (
-						cur_item.has_batch_no &&
-						cur_item.batch_no
-					) {
+					if (cur_item.has_batch_no && cur_item.batch_no) {
 						callSetBatchQty(
 							context,
 							cur_item,
@@ -792,7 +882,9 @@ export function useItemAddition() {
 					}
 
 					callSetSerialNo(context, cur_item);
-					if (cur_item.has_serial_no) autoAssignSerials(cur_item, context);
+					if (cur_item.has_serial_no)
+						autoAssignSerials(cur_item, context);
+					updateLineAmounts(cur_item, context);
 
 					if (
 						context.calc_uom &&
@@ -822,7 +914,7 @@ export function useItemAddition() {
 					}
 				}
 			} else {
-				const cur_item = context.items[index];
+				let cur_item = context.items[index];
 				const previousQty = cur_item.qty;
 				if (context.update_items_details) {
 					cur_item._needs_update = true;
@@ -851,24 +943,41 @@ export function useItemAddition() {
 					item.to_set_serial_no = null;
 				}
 
-				// For returns, subtract from quantity to make it more negative
-				if (context.isReturnInvoice) {
-					cur_item.qty -= Math.abs(item.qty || 1);
-				} else {
-					cur_item.qty += item.qty || 1;
-				}
-				calcStockQty(cur_item, cur_item.qty);
+				const mergeIntoLine = (line: any) => {
+					// For returns, subtract from quantity to make it more negative
+					if (context.isReturnInvoice) {
+						line.qty =
+							toFiniteNumber(line.qty) -
+							Math.abs(qtyOrOne(item.qty));
+					} else {
+						line.qty =
+							toFiniteNumber(line.qty) + qtyOrOne(item.qty);
+					}
+					calcStockQty(line, line.qty);
 
-				// Update batch quantity if needed
+					// Update batch quantity if needed
+					if (line.has_batch_no && line.batch_no) {
+						callSetBatchQty(context, line, line.batch_no, false);
+					}
+
+					callSetSerialNo(context, line);
+					if (line.has_serial_no) autoAssignSerials(line, context);
+					updateLineAmounts(line, context);
+				};
+
 				if (
-					cur_item.has_batch_no &&
-					cur_item.batch_no
+					context.invoiceStore?.updateItemWithTotals &&
+					cur_item?.posa_row_id
 				) {
-					callSetBatchQty(context, cur_item, cur_item.batch_no, false);
+					const updatedItem =
+						context.invoiceStore.updateItemWithTotals(
+							cur_item.posa_row_id,
+							mergeIntoLine,
+						);
+					if (updatedItem) cur_item = updatedItem;
+				} else {
+					mergeIntoLine(cur_item);
 				}
-
-				callSetSerialNo(context, cur_item);
-				if (cur_item.has_serial_no) autoAssignSerials(cur_item, context);
 
 				// Recalculate rates if UOM differs from stock UOM
 				if (
@@ -907,9 +1016,9 @@ export function useItemAddition() {
 	// Reset all invoice fields to default/empty values
 	const clearInvoice = (
 		context,
-		options: { preserveStickies?: boolean } = {},
+		options: { preserveStickies?: boolean; preserveExchange?: boolean } = {},
 	) => {
-		const { preserveStickies = false } = options;
+		const { preserveStickies = false, preserveExchange = false } = options;
 		const previousInvoiceType = context.invoiceType;
 		const wasReturn =
 			previousInvoiceType === "Return" ||
@@ -918,6 +1027,7 @@ export function useItemAddition() {
 
 		if (context.invoiceStore) {
 			context.invoiceStore.clear({ preserveStickies });
+			if (!preserveExchange) context.invoiceStore.clearExchange?.();
 		} else {
 			context.items = [];
 			context.packed_items = [];
@@ -949,11 +1059,12 @@ export function useItemAddition() {
 		context.customer = context.pos_profile.customer;
 
 		context.eventBus.emit("set_customer_readonly", false);
-		context.invoiceType = wasReturn || wasQuotation
-			? "Invoice"
-			: context.pos_profile.posa_default_sales_order
-				? "Order"
-				: "Invoice";
+		context.invoiceType =
+			wasReturn || wasQuotation
+				? "Invoice"
+				: context.pos_profile.posa_default_sales_order
+					? "Order"
+					: "Invoice";
 		context.invoiceTypes = ["Invoice", "Order", "Quotation"];
 
 		if (Object.prototype.hasOwnProperty.call(context, "itemSearch")) {

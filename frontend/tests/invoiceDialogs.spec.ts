@@ -62,6 +62,22 @@ describe("invoice payment dialogs", () => {
 		expect(context.eventBus.emit).toHaveBeenCalledWith("show_payment", "true");
 	});
 
+	it("completes automatic batch assignment before validating payment", async () => {
+		const context = createPaymentContext();
+		const sequence: string[] = [];
+		context.ensure_auto_batch_selection = vi.fn(async () => {
+			sequence.push("assign");
+		});
+		context.validate = vi.fn(async () => {
+			sequence.push("validate");
+			return true;
+		});
+
+		await show_payment(context);
+
+		expect(sequence).toEqual(["assign", "validate"]);
+	});
+
 	it("switches compact layout back to the invoice when closing payments", () => {
 		const context = {
 			_suppressClosePayments: false,

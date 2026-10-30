@@ -1,4 +1,10 @@
 import { isOffline } from "../../../../offline/index";
+import {
+	fetchDocumentSourceRecords,
+	getDefaultDocumentSource,
+	loadDocumentSourceRecord,
+} from "../../../utils/documentSources";
+import { resolvePosDocumentDoctype } from "../../../utils/posDocumentMode";
 
 declare const __: (_text: string, _args?: any[]) => string;
 declare const frappe: any;
@@ -31,18 +37,26 @@ export async function show_payment(context: any) {
 			return;
 		}
 
+		if (context.ensure_auto_batch_selection) await context.ensure_auto_batch_selection();
+
 		const isValid = context.validate ? await context.validate() : true;
 
 		if (!isValid) {
 			return;
 		}
 
-		if (context.ensure_auto_batch_selection) await context.ensure_auto_batch_selection();
+		// Capture the transient refundable cap before process_invoice()/backend
+		// reload, which return a doc stripped of non-DocType fields. It is
+		// re-attached below so the payment screen can default a credit return.
+		const carriedRefundableAmount = context.invoice_doc?.posa_refundable_amount;
 
 		let invoice_doc;
+		const paymentDoctype = resolvePosDocumentDoctype({
+			invoiceType: context.invoiceType,
+			posProfile: context.pos_profile,
+		});
 		if (
-			context.invoiceType === "Order" &&
-			context.pos_profile.posa_create_only_sales_order &&
+			paymentDoctype === "Sales Order" &&
 			!context.new_delivery_date &&
 			!(context.invoice_doc && context.invoice_doc.posa_delivery_date)
 		) {
@@ -136,6 +150,20 @@ export async function show_payment(context: any) {
 		}
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
+		// Re-attach the refundable cap stripped by the backend save/reload so the
+		// payment screen can default an unpaid-invoice return to a credit note.
+		if (carriedRefundableAmount != null && invoice_doc) {
+			invoice_doc.posa_refundable_amount = carriedRefundableAmount;
+		}
+		const exchangeSession = context.invoiceStore?.exchangeSession;
+		if (exchangeSession?.stage === "sale" && exchangeSession.returnDoc) {
+			if (exchangeSession.returnDoc.customer !== invoice_doc.customer) {
+				throw new Error(__("Replacement sale customer must match the return customer."));
+			}
+			invoice_doc.posa_exchange_credit = Number(exchangeSession.returnTotal || 0);
+			invoice_doc.posa_exchange_request_id = exchangeSession.clientRequestId;
+		}
+
 		context.eventBus.emit("show_payment", "true");
 		context.eventBus.emit("send_invoice_doc_payment", invoice_doc);
 	} catch (error: any) {
@@ -153,41 +181,52 @@ export async function show_payment(context: any) {
 	}
 }
 
-export async function get_draft_invoices(context: any) {
+export async function get_draft_invoices(
+	context: any,
+	source?: "invoice" | "order" | "quote",
+) {
 	try {
-		const { message } = await frappe.call({
-			method: "posawesome.posawesome.api.invoices.get_draft_invoices",
-			args: {
-				pos_opening_shift: context.pos_opening_shift.name,
-				doctype: context.pos_profile.create_pos_invoice_instead_of_sales_invoice
-					? "POS Invoice"
-					: "Sales Invoice",
-			},
+		const selectedSource = getDefaultDocumentSource(
+			context.pos_profile,
+			source ?? context.uiStore?.draftSource,
+		);
+		context.uiStore.setDraftSource?.(selectedSource);
+		context.uiStore.setParkedOrders?.([]);
+		context.$refs?.invoiceSummary?.setDraftsLoading?.(true);
+		context.$refs?.invoiceSummary?.openDraftsSurface?.({ focus: false });
+
+		const drafts = await fetchDocumentSourceRecords({
+			source: selectedSource,
+			posOpeningShift: context.pos_opening_shift,
+			posProfile: context.pos_profile,
+			currentInvoiceDoctype: context.pos_profile?.create_pos_invoice_instead_of_sales_invoice
+				? "POS Invoice"
+				: "Sales Invoice",
 		});
-		if (message) {
-			context.uiStore.openDrafts(message);
+		context.uiStore.setDraftsData?.(drafts);
+		context.uiStore.setParkedOrders?.(drafts);
+		context.uiStore.closeDrafts?.();
+		context.$refs?.invoiceSummary?.setDraftsLoading?.(false);
+
+		if (typeof context.$nextTick === "function") {
+			await context.$nextTick();
 		}
+		context.$refs?.invoiceSummary?.openDraftsSurface?.({ focus: false });
+		await context.$refs?.invoiceSummary?.focusDraftsSurface?.();
 	} catch (error) {
 		console.error("Error fetching draft invoices:", error);
 		context.toastStore.show({
-			title: __("Unable to fetch draft invoices"),
+			title: __("Unable to fetch documents"),
 			color: "error",
 		});
+	} finally {
+		context.$refs?.invoiceSummary?.setDraftsLoading?.(false);
 	}
 }
 
 export async function get_draft_orders(context: any) {
 	try {
-		const { message } = await frappe.call({
-			method: "posawesome.posawesome.api.sales_orders.search_orders",
-			args: {
-				company: context.pos_profile.company,
-				currency: context.pos_profile.currency,
-			},
-		});
-		if (message) {
-			context.uiStore.openOrders(message);
-		}
+		context.uiStore?.openInvoiceManagement?.("drafts", "order");
 	} catch (error) {
 		console.error("Error fetching draft orders:", error);
 		context.toastStore.show({
@@ -202,8 +241,47 @@ export function open_returns(context: any) {
 	context.eventBus.emit("open_returns", context.pos_profile.company);
 }
 
-export function open_invoice_management(context: any) {
-	context.uiStore?.openInvoiceManagement?.();
+export function open_invoice_management(
+	context: any,
+	targetTab: string = "history",
+	draftSource?: "invoice" | "order" | "quote",
+) {
+	const selectedSource = draftSource || context.uiStore?.draftSource || "invoice";
+	context.uiStore?.openInvoiceManagement?.(
+		targetTab,
+		selectedSource,
+	);
+}
+
+export function open_invoice_management_with_source(
+	context: any,
+	targetTab: string = "history",
+	draftSource: "invoice" | "order" | "quote" = "invoice",
+) {
+	context.uiStore?.setInvoiceManagementDraftSource?.(draftSource);
+	return open_invoice_management(context, targetTab, draftSource);
+}
+
+export async function load_draft_source_record(context: any, draft: any) {
+	try {
+		const selectedSource = draft?.source || context.uiStore?.draftSource || "invoice";
+		const message = await loadDocumentSourceRecord({
+			source: selectedSource,
+			record: draft,
+			posProfile: context.pos_profile,
+			currentInvoiceDoctype: context.pos_profile?.create_pos_invoice_instead_of_sales_invoice
+				? "POS Invoice"
+				: "Sales Invoice",
+			invoiceStore: context.invoiceStore,
+			uiStore: context.uiStore,
+			closeDrafts: false,
+			closeInvoiceManagement: false,
+		});
+		return message;
+	} catch (error) {
+		console.error("Error loading source record:", error);
+		throw error;
+	}
 }
 
 export function close_payments(context: any) {
@@ -324,6 +402,8 @@ export async function change_price_list_rate(
 					price_list: priceList,
 					rate: nextRate,
 					uom: item.uom || item.stock_uom || undefined,
+					pos_profile: context.pos_profile?.name,
+					customer: context.customer || undefined,
 				},
 			});
 			item._price_list_rate_persisted = true;

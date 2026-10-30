@@ -4,3 +4,20 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+#page-posapp input::-webkit-outer-spin-button,
+#page-posapp input::-webkit-inner-spin-button,
+.posapp input::-webkit-outer-spin-button,
+.posapp input::-webkit-inner-spin-button,
+.pos-app input::-webkit-outer-spin-button,
+.pos-app input::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+}
+
+#page-posapp input[type="number"],
+.posapp input[type="number"],
+.pos-app input[type="number"] {
+	appearance: textfield;
+	-moz-appearance: textfield;
+}

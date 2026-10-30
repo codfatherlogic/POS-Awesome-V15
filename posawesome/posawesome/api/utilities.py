@@ -13,6 +13,8 @@ import re
 import json
 import subprocess
 
+from posawesome import __version__ as POS_AWESOME_APP_VERSION
+
 try:
     import psutil
 except ImportError:  # pragma: no cover - optional dependency
@@ -23,6 +25,28 @@ import functools
 
 from .utils import get_item_groups, fetch_sales_person_names
 from posawesome.utils import get_build_version
+
+POS_AWESOME_REPO_URL = "https://github.com/defendicon/POS-Awesome-V15"
+
+
+def _normalize_release_tag(version):
+    tag = cstr(version).strip()
+    if tag.startswith("v") and len(tag) > 1 and tag[1].isdigit():
+        tag = tag[1:]
+    return tag or None
+
+
+def _build_release_url(version):
+    tag = _normalize_release_tag(version)
+    return f"{POS_AWESOME_REPO_URL}/releases/tag/{tag}" if tag else None
+
+
+def _get_update_metadata() -> Dict[str, Any]:
+    return {
+        "app_version": POS_AWESOME_APP_VERSION,
+        "repo_url": POS_AWESOME_REPO_URL,
+        "release_url": _build_release_url(POS_AWESOME_APP_VERSION),
+    }
 
 
 def get_version():
@@ -171,7 +195,7 @@ def get_app_info() -> Dict[str, List[Dict[str, str]]]:
 
         apps_info.append({"app_name": app_name, "installed_version": app_version})
 
-    return {"apps": apps_info, "build_version": get_build_version()}
+    return {"apps": apps_info, "build_version": get_build_version(), **_get_update_metadata()}
 
 
 def _get_git_commit_info(app_name: str = "posawesome") -> Dict[str, Any]:
@@ -185,11 +209,7 @@ def _get_git_commit_info(app_name: str = "posawesome") -> Dict[str, Any]:
         return {}
 
     def _run(cmd: List[str]) -> str:
-        return (
-            subprocess.check_output(cmd, cwd=app_path, stderr=subprocess.DEVNULL)
-            .decode("utf-8")
-            .strip()
-        )
+        return subprocess.check_output(cmd, cwd=app_path, stderr=subprocess.DEVNULL).decode("utf-8").strip()
 
     try:
         commit_hash = _run(["git", "rev-parse", "HEAD"])
@@ -207,7 +227,7 @@ def _get_git_commit_info(app_name: str = "posawesome") -> Dict[str, Any]:
 @frappe.whitelist()
 def get_build_info() -> Dict[str, Any]:
     """Return build version + latest git commit info for update prompts."""
-    data: Dict[str, Any] = {"build_version": get_build_version()}
+    data: Dict[str, Any] = {"build_version": get_build_version(), **_get_update_metadata()}
     data.update(_get_git_commit_info("posawesome"))
     return data
 
@@ -251,21 +271,33 @@ def _get_remote_heads(app_path: str) -> Dict[str, str]:
 
 def _get_commit_details(app_path: str, ref: str) -> Dict[str, str]:
     try:
-        commit_message = subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%B", ref],
-            cwd=app_path,
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8").strip()
-        commit_date = subprocess.check_output(
-            ["git", "log", "-1", "--pretty=%cI", ref],
-            cwd=app_path,
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8").strip()
-        commit_hash = subprocess.check_output(
-            ["git", "rev-parse", ref],
-            cwd=app_path,
-            stderr=subprocess.DEVNULL,
-        ).decode("utf-8").strip()
+        commit_message = (
+            subprocess.check_output(
+                ["git", "log", "-1", "--pretty=%B", ref],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        commit_date = (
+            subprocess.check_output(
+                ["git", "log", "-1", "--pretty=%cI", ref],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+        commit_hash = (
+            subprocess.check_output(
+                ["git", "rev-parse", ref],
+                cwd=app_path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
         return {
             "commit_hash": commit_hash,
             "commit_message": commit_message,
@@ -310,6 +342,7 @@ def _get_commit_list(app_path: str, range_ref: str, limit: int = 20) -> List[Dic
     except Exception:
         return []
 
+
 def _get_current_branch(app_path: str) -> str:
     try:
         branch = (
@@ -328,7 +361,7 @@ def _get_current_branch(app_path: str) -> str:
 
 @frappe.whitelist()
 def get_remote_update_info() -> Dict[str, Any]:
-    data: Dict[str, Any] = {"build_version": get_build_version()}
+    data: Dict[str, Any] = {"build_version": get_build_version(), **_get_update_metadata()}
     base = _get_git_commit_info("posawesome")
     if base:
         data.update(base)
@@ -359,9 +392,7 @@ def get_remote_update_info() -> Dict[str, Any]:
             if details:
                 data["remote_sample_branch"] = current_branch
                 data["remote_sample"] = details
-            data["remote_commits"] = _get_commit_list(
-                app_path, f"{current_hash}..{ref}"
-            )
+            data["remote_commits"] = _get_commit_list(app_path, f"{current_hash}..{ref}")
 
     return data
 
@@ -635,6 +666,7 @@ def _set_active_session_language(lang_code: str) -> None:
 
 
 # Language display names mapping (moved to module level for reuse)
+# Language display names mapping (moved to module level for reuse)
 LANGUAGE_NAMES = {
     "en": "English",
     "ar": "العربية",
@@ -665,6 +697,59 @@ LANGUAGE_NAMES = {
     "et": "Eesti",
     "lv": "Latviešu",
     "lt": "Lietuvių",
+    "af": "Afrikaans",
+    "am": "አማርኛ",
+    "bn": "বাংলা",
+    "bo": "བོད་སྐད",
+    "bs": "Bosanski",
+    "ca": "Català",
+    "el": "Ελληνικά",
+    "en-GB": "English (UK)",
+    "en-US": "English (US)",
+    "eo": "Esperanto",
+    "es-AR": "Español (Argentina)",
+    "es-BO": "Español (Bolivia)",
+    "es-CL": "Español (Chile)",
+    "es-CO": "Español (Colombia)",
+    "es-DO": "Español (República Dominicana)",
+    "es-EC": "Español (Ecuador)",
+    "es-GT": "Español (Guatemala)",
+    "es-MX": "Español (México)",
+    "es-NI": "Español (Nicaragua)",
+    "es-PE": "Español (Perú)",
+    "fa": "فارسی",
+    "fil": "Filipino",
+    "gu": "ગુજરાતી",
+    "he": "עברית",
+    "id": "Bahasa Indonesia",
+    "is": "Íslenska",
+    "km": "ភាសាខ្មែរ",
+    "kn": "ಕನ್ನಡ",
+    "ku": "Kurdî",
+    "lo": "ລາວ",
+    "mk": "Македонски",
+    "ml": "മലയാളം",
+    "mn": "Монгол",
+    "mr": "मराठी",
+    "ms": "Bahasa Melayu",
+    "my": "မြန်မာဘာသာ",
+    "nb": "Norsk Bokmål",
+    "ps": "پښتو",
+    "pt-BR": "Português (Brasil)",
+    "rw": "Kinyarwanda",
+    "si": "සිංහල",
+    "sq": "Shqip",
+    "sr": "Српски",
+    "sr-CS": "Srpski",
+    "sw": "Kiswahili",
+    "ta": "தமிழ்",
+    "te": "తెలుగు",
+    "th": "ไทย",
+    "uk": "Українська",
+    "ur": "اردو",
+    "uz": "Oʻzbek",
+    "vi": "Tiếng Việt",
+    "zh-TW": "中文 (台灣)",
 }
 
 

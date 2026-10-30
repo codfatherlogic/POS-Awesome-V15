@@ -3,9 +3,17 @@
 from erpnext.accounts.doctype.pos_invoice.pos_invoice import POSInvoice as ERPNextPOSInvoice
 
 from posawesome.posawesome.api.invoice import validate_shift
+from posawesome.posawesome.overrides.sales_invoice_subcontracting import (
+    SalesInvoiceSubcontractingGuardMixin,
+)
+from posawesome.posawesome.overrides.multi_currency_payments import MultiCurrencyPOSPaymentsMixin
 
 
-class CustomPOSInvoice(ERPNextPOSInvoice):
+class CustomPOSInvoice(
+    MultiCurrencyPOSPaymentsMixin,
+    SalesInvoiceSubcontractingGuardMixin,
+    ERPNextPOSInvoice,
+):
     """Override ERPNext POS Invoice to respect POS Awesome opening shifts."""
 
     def validate_pos_opening_entry(self):

@@ -1,6 +1,11 @@
 ﻿<!-- eslint-disable vue/multi-word-component-names -->
 <template>
-	<div :class="['payment-shell', { 'payment-shell--dialog': dialogMode }]">
+	<div
+		ref="paymentRoot"
+		data-pos-keyboard-root="payment"
+		data-testid="payment-root"
+		:class="['payment-shell', { 'payment-shell--dialog': dialogMode }]"
+	>
 		<v-card
 			:class="[
 				'selection mx-auto my-0 pos-themed-card payment-card',
@@ -13,14 +18,33 @@
 				absolute
 				location="top"
 				color="info"
+				:aria-label="__('Loading payment details')"
 			></v-progress-linear>
-			<div
-				ref="paymentContainer"
-				class="overflow-y-auto payment-scroll"
-			>
+			<div ref="paymentContainer" class="overflow-y-auto payment-scroll">
 				<div :class="['payment-sections', { 'payment-sections--dialog': dialogMode }]">
+					<v-alert
+						v-if="exchangeSession?.stage === 'sale'"
+						color="success"
+						variant="tonal"
+						density="compact"
+						icon="mdi-swap-horizontal-bold"
+						class="exchange-payment-banner"
+					>
+						<strong>{{ __("Exchange settlement") }}</strong>
+						<span>
+							{{ __("Replacement sale") }} {{ currencySymbol(invoice_doc.currency)
+							}}{{ formatCurrency(invoice_doc.rounded_total || invoice_doc.grand_total) }} •
+							{{ __("Return credit") }} {{ currencySymbol(invoice_doc.currency)
+							}}{{ formatCurrency(exchangeSession.returnTotal) }} •
+							{{ exchangeSettlementLabel }} {{ currencySymbol(invoice_doc.currency)
+							}}{{ formatCurrency(exchangeSettlementAmount) }}
+						</span>
+					</v-alert>
 					<section class="payment-section payment-section--summary">
 						<div class="payment-section__header">
+							<span class="payment-section__icon"
+								><v-icon icon="mdi-calculator-variant-outline" size="18"
+							/></span>
 							<h3 class="payment-section__title">{{ __("Payment Summary") }}</h3>
 						</div>
 						<PaymentSummary
@@ -28,16 +52,37 @@
 							:total_payments_display="total_payments_display"
 							:diff_payment_display="diff_payment_display"
 							:diff_label="diff_label"
+							:diff-payment="diff_payment"
 							:change_due="change_due"
+							:base-settlement="base_settlement"
+							:base-currency="companyCurrency"
 							:paid_change="paid_change"
 							:credit_change="credit_change"
 							:paid_change_rules="paid_change_rules"
 							:currencySymbol="currencySymbol"
 							:formatCurrency="formatCurrency"
+							:gift-card-applied-amount="giftCardAppliedAmount"
+							:gift-card-code="giftCardRedemptions[0]?.gift_card_code || ''"
+							:exchange-active="exchangeSession?.stage === 'sale'"
+							:exchange-credit="Number(exchangeSession?.returnTotal || 0)"
+							:exchange-settlement-amount="exchangeSettlementAmount"
+							:exchange-settlement-label="exchangeSettlementLabel"
 							@show-paid-amount="showPaidAmount"
 							@show-diff-payment="showDiffPayment"
 							@show-paid-change="showPaidChange"
 							@update-credit-change="handleCreditChangeUpdate"
+						/>
+						<ChangeCurrencyHelper
+							:enabled="changeCurrencyEnabled"
+							:change-due="change_due"
+							:remaining="remainingChange"
+							:rows="changeReturnRows"
+							:currencies="allowedChangeCurrencies"
+							:format-currency="(value) => formatCurrency(value, invoice_doc.currency)"
+							@add-row="addChangeReturnRow"
+							@remove-row="removeChangeReturnRow"
+							@update-amount="handleChangeReturnAmount"
+							@update-currency="handleChangeReturnCurrency"
 						/>
 					</section>
 
@@ -46,30 +91,64 @@
 						class="payment-section payment-section--methods"
 					>
 						<div class="payment-section__header">
+							<span class="payment-section__icon"
+								><v-icon icon="mdi-wallet-outline" size="18"
+							/></span>
 							<h3 class="payment-section__title">{{ __("Payment Methods") }}</h3>
 						</div>
 						<PaymentMethods
-							:payments="invoice_doc.payments"
+							:payments="visiblePaymentMethods"
 							:currency="invoice_doc.currency"
 							:isReturn="invoice_doc.is_return"
 							:requestPaymentField="request_payment_field"
+							:multi-currency-enabled="multiCurrencyEnabled"
+							:allow-currency-selection="allowCurrencySelection"
+							:allow-manual-rate="allowManualRate"
+							:allowed-currencies="allowedPaymentCurrencies"
 							:currencySymbol="currencySymbol"
 							:formatCurrency="formatCurrency"
 							:isNumber="isNumber"
 							:getVisibleDenominations="getVisibleDenominations"
 							:isCashLikePayment="isCashLikePayment"
 							:isMpesaC2bPayment="is_mpesa_c2b_payment"
+							:isGiftCardPayment="isGiftCardPayment"
+							:show-keyboard-shortcuts="counterGridMode"
 							@update-amount="handlePaymentAmountChange"
-							@set-full-amount="set_full_amount"
+							@update-currency="handlePaymentCurrencyChange"
+							@update-rate="handlePaymentRateChange"
+							@set-rest-amount="set_rest_amount"
+							@toggle-remainder-lock="toggle_remainder_lock"
+							@set-full-amount="handleSetFullAmount"
 							@set-denomination="setPaymentToDenomination"
 							@mpesa-dialog="mpesa_c2b_dialog"
 							@request-payment="request_payment"
-							@set-rest-amount="set_rest_amount"
+							@open-gift-card="openGiftCardDialog"
+						/>
+						<PaymentGiftCardSection
+							:enabled="Boolean(pos_profile?.posa_use_gift_cards)"
+							:expanded="giftCardInlineExpanded"
+							:applied-amount="giftCardAppliedAmount"
+							:card-code="giftCardCode || giftCardRedemptions[0]?.gift_card_code || ''"
+							:redeem-amount="giftCardAmount"
+							:balance="giftCardBalance"
+							:status="giftCardStatus"
+							:loading="giftCardLoading"
+							:error-message="giftCardError"
+							:format-currency="(value) => formatCurrency(value, invoice_doc.currency)"
+							@toggle="toggleGiftCardInline"
+							@update:card-code="giftCardCode = $event"
+							@update:redeem-amount="giftCardAmount = $event"
+							@check-balance="checkGiftCardBalance"
+							@apply="applyGiftCardRedemption"
+							@clear="clearGiftCardRedemption"
 						/>
 					</section>
 
 					<section class="payment-section payment-section--adjustments">
 						<div class="payment-section__header">
+							<span class="payment-section__icon"
+								><v-icon icon="mdi-receipt-text-outline" size="18"
+							/></span>
 							<h3 class="payment-section__title">{{ __("Redemption and Totals") }}</h3>
 						</div>
 						<PaymentRedemption
@@ -91,6 +170,7 @@
 							:displayCurrency="displayCurrency"
 							:diff_payment="diff_payment"
 							:diff_label="diff_label"
+							:item-discount-total="paymentItemDiscountTotal"
 							:currencySymbol="currencySymbol"
 							:formatCurrency="formatCurrency"
 						/>
@@ -138,6 +218,9 @@
 
 					<section class="payment-section payment-section--settlement">
 						<div class="payment-section__header">
+							<span class="payment-section__icon"
+								><v-icon icon="mdi-credit-card-check-outline" size="18"
+							/></span>
 							<h3 class="payment-section__title">{{ __("Credit and Output") }}</h3>
 						</div>
 						<PaymentOptions
@@ -155,6 +238,10 @@
 							:write-off-amount="invoice_doc.write_off_amount || Math.max(diff_payment, 0)"
 							:write-off-max-amount="writeOffProfileLimit"
 							:redeem-customer-credit="redeem_customer_credit"
+							:available-customer-credit="available_customer_credit"
+							:redeemed-customer-credit="redeemed_customer_credit"
+							:customer-credit-sources="customer_credit_dict.length"
+							:format-currency="formatCurrency"
 							@update:is-write-off-change="is_write_off_change = $event"
 							@update:is-credit-sale="is_credit_sale = $event"
 							@update:is-cashback="is_cashback = $event"
@@ -171,36 +258,43 @@
 							@update:redeem-customer-credit="redeem_customer_credit = $event"
 							@get-available-credit="get_available_credit"
 						/>
-					<PaymentCustomerCreditDetails
-						:invoice-doc="invoice_doc"
-						:available-customer-credit="available_customer_credit"
-						:redeem-customer-credit="redeem_customer_credit"
+						<PaymentCustomerCreditDetails
+							:invoice-doc="invoice_doc"
+							:available-customer-credit="available_customer_credit"
+							:redeem-customer-credit="redeem_customer_credit"
 							:customer-credit-dict="customer_credit_dict"
 							:credit-source-label="creditSourceLabel"
 							:format-currency="formatCurrency"
 							:currency-symbol="currencySymbol"
-						@set-formatted-currency="
-							(data) => setFormatedCurrency(data.target, data.field, null, false, data.value)
-						"
-					/>
-				</section>
+							@set-formatted-currency="
+								(data) =>
+									setFormatedCurrency(data.target, data.field, null, false, data.value)
+							"
+						/>
+					</section>
 
-				<section class="payment-section payment-section--meta">
-					<div class="payment-section__header">
-						<h3 class="payment-section__title">{{ __("Sales Person and Print") }}</h3>
-					</div>
-					<PaymentSelectionFields
-						:sales-persons="sales_persons"
-						:sales-person="sales_person"
-						:readonly="readonly"
-						:print-formats="print_formats"
-						:print-format="print_format"
-						@update:sales-person="sales_person = $event"
-						@update:print-format="print_format = $event"
-					/>
-				</section>
+					<section class="payment-section payment-section--meta">
+						<div class="payment-section__header">
+							<span class="payment-section__icon"
+								><v-icon icon="mdi-account-tie-outline" size="18"
+							/></span>
+							<h3 class="payment-section__title">{{ __("Sales Person and Print") }}</h3>
+						</div>
+						<PaymentSelectionFields
+							:sales-persons="sales_persons"
+							:sales-person="sales_person"
+							:readonly="readonly"
+							:print-formats="print_formats"
+							:print-format="print_format"
+							:show-print-format="
+								parseBooleanSetting(pos_profile?.posa_allow_select_print_format_in_payments)
+							"
+							@update:sales-person="sales_person = $event"
+							@update:print-format="print_format = $event"
+						/>
+					</section>
+				</div>
 			</div>
-		</div>
 		</v-card>
 
 		<div :class="['payment-footer', { 'payment-footer--dialog': dialogMode }]">
@@ -210,6 +304,7 @@
 				:validatePayment="validatePayment"
 				:highlightSubmit="highlightSubmit"
 				:compact="dialogMode"
+				:show-keyboard-shortcuts="counterGridMode"
 				@submit="submit"
 				@submit-and-print="submit(undefined, false, true)"
 				@cancel="back_to_invoice"
@@ -227,6 +322,35 @@
 			@update:phone-dialog="phone_dialog = $event"
 			@request-payment="request_payment"
 		/>
+		<GiftCardDialog
+			:model-value="giftCardDialogOpen"
+			:card-code="giftCardCode"
+			:redeem-amount="giftCardAmount"
+			:balance="giftCardBalance"
+			:status="giftCardStatus"
+			:is-supervisor="Boolean(currentCashier?.is_supervisor)"
+			:loading="giftCardLoading"
+			:mode="giftCardMode"
+			:error-message="giftCardError"
+			@update:model-value="giftCardDialogOpen = $event"
+			@update:card-code="giftCardCode = $event"
+			@update:redeem-amount="giftCardAmount = $event"
+			@set-mode="setGiftCardMode"
+			@check-balance="checkGiftCardBalance"
+			@apply-redemption="applyGiftCardRedemption"
+			@issue-card="issueGiftCard"
+			@top-up-card="topUpGiftCard"
+		/>
+		<BelowCostOverrideDialog
+			v-model="belowCostOverrideDialogOpen"
+			:risks="belowCostOverrideRisks"
+			:reason="belowCostOverrideReason"
+			:cashier-name="currentCashier?.full_name || currentCashier?.user || ''"
+			:format-float="(value) => formatFloat(value, currency_precision)"
+			@update:reason="belowCostOverrideReason = $event"
+			@approve="approveBelowCostOverride"
+			@cancel="cancelBelowCostOverride"
+		/>
 	</div>
 </template>
 
@@ -241,6 +365,7 @@ import { useUIStore } from "../../stores/uiStore.js";
 import { useToastStore } from "../../stores/toastStore.js";
 import { useSyncStore } from "../../stores/syncStore.ts";
 import { useSocketStore } from "../../stores/socketStore";
+import { useEmployeeStore } from "../../stores/employeeStore";
 
 // Composables
 import { usePaymentCalculations } from "../../composables/pos/payments/usePaymentCalculations";
@@ -248,20 +373,41 @@ import { usePaymentSubmission } from "../../composables/pos/payments/usePaymentS
 import { useRedemptionLogic } from "../../composables/pos/payments/useRedemptionLogic";
 import { usePaymentPrinting } from "../../composables/pos/payments/usePaymentPrinting";
 import { usePaymentMethods } from "../../composables/pos/payments/usePaymentMethods";
+import { usePaymentCurrencies } from "../../composables/pos/payments/usePaymentCurrencies";
+import { useChangeCurrencies } from "../../composables/pos/payments/useChangeCurrencies";
 import { useInvoiceDetails } from "../../composables/pos/invoice/useInvoiceDetails";
 import { useFormat } from "../../format";
-import { isOffline } from "../../../offline/index";
 import {
+	isOffline,
+	getStoredCustomer,
+	getCachedGiftCardSnapshot,
+	saveGiftCardSnapshot,
+} from "../../../offline/index";
+import GiftCardDialog from "./wallet/GiftCardDialog.vue";
+import BelowCostOverrideDialog from "./payments/BelowCostOverrideDialog.vue";
+import {
+	applyPreferredPaymentAmount,
 	initializePaymentLinesForDialog,
 	rebalancePreferredPaymentLine,
 	resolvePreferredPaymentLine,
+	resolveReturnDefaultAmount,
+	shouldApplyReturnRefundCap,
 } from "../../utils/paymentInitialization";
+import { resolvePaymentPrintFormatDoctypes } from "../../utils/paymentPrintDoctype";
+import { resolvePaymentPrintFormat } from "../../utils/paymentPrintFormat";
+import { parseBooleanSetting } from "../../utils/stock";
+import { toCompanyCurrency } from "../../utils/erpnextCurrency";
+import { focusFirstKeyboardTarget } from "../../utils/keyboardNavigation";
+import { resolveCounterGridPaymentShortcut } from "../../utils/counterGridPaymentShortcuts";
+import { getExchangeSettlement } from "../../utils/exchangeSettlement";
 
 // Components
 import PaymentSummary from "./payments/PaymentSummary.vue";
+import ChangeCurrencyHelper from "./payments/ChangeCurrencyHelper.vue";
 import InvoiceTotals from "./payments/InvoiceTotals.vue";
 import PaymentActionButtons from "./payments/PaymentActionButtons.vue";
 import PaymentMethods from "./payments/PaymentMethods.vue";
+import PaymentGiftCardSection from "./payments/PaymentGiftCardSection.vue";
 import PaymentRedemption from "./payments/PaymentRedemption.vue";
 import PaymentAdditionalInfo from "./payments/PaymentAdditionalInfo.vue";
 import PaymentPurchaseOrder from "./payments/PaymentPurchaseOrder.vue";
@@ -272,6 +418,10 @@ import PaymentDialogs from "./payments/PaymentDialogs.vue";
 
 const props = defineProps({
 	dialogMode: {
+		type: Boolean,
+		default: false,
+	},
+	counterGridMode: {
 		type: Boolean,
 		default: false,
 	},
@@ -303,6 +453,8 @@ const {
 const { selectedCustomer, customerInfo } = storeToRefs(customersStore);
 const { activeView, paymentDialogOpen } = storeToRefs(uiStore);
 const { invoiceType } = storeToRefs(invoiceStore);
+const employeeStore = useEmployeeStore();
+const { currentCashier } = storeToRefs(employeeStore);
 
 // State
 const is_return = ref(false);
@@ -328,35 +480,140 @@ const highlightSubmit = ref(false);
 const last_payment_change_was_cash = ref(null);
 const backgroundStatusCheck = ref(null);
 const paymentVisible = ref(false);
+const paymentRoot = ref(null);
 const paymentContainer = ref(null);
 const submitButton = ref(null);
 const _shortcutHandlers = ref({});
 const readonly = ref(false); // Add missing readonly ref
 const submissionInFlight = ref(false);
 const queuedShortcutSubmit = ref(null);
+const giftCardDialogOpen = ref(false);
+const giftCardInlineExpanded = ref(false);
+const activeGiftCardPayment = ref(null);
+const giftCardCode = ref("");
+const giftCardAmount = ref(0);
+const giftCardBalance = ref(0);
+const giftCardStatus = ref("");
+const giftCardLoading = ref(false);
+const giftCardMode = ref("redeem");
+const giftCardError = ref("");
+const giftCardRedemptions = ref([]);
+const belowCostOverrideDialogOpen = ref(false);
+const belowCostOverrideRisks = ref([]);
+const belowCostOverrideReason = ref("");
+let belowCostOverrideResolver = null;
 
 // Computed Properties
 const invoice_doc = computed({
 	get: () => invoiceStore.invoiceDoc || {},
 	set: (value) => invoiceStore.setInvoiceDoc(value),
 });
+const exchangeSession = computed(() => invoiceStore.exchangeSession);
+const exchangeSettlement = computed(() => {
+	const sale = flt(
+		invoice_doc.value?.rounded_total || invoice_doc.value?.grand_total || 0,
+		currency_precision.value,
+	);
+	return getExchangeSettlement(sale, exchangeSession.value?.returnTotal || 0, currency_precision.value);
+});
+const exchangeSettlementAmount = computed(() => exchangeSettlement.value.amount);
+const exchangeSettlementLabel = computed(() => {
+	if (exchangeSettlement.value.type === "even") return __("Even exchange");
+	return exchangeSettlement.value.type === "payment" ? __("Customer pays") : __("Customer credit");
+});
+
+const resolveBelowCostOverride = (result) => {
+	const resolver = belowCostOverrideResolver;
+	belowCostOverrideResolver = null;
+	belowCostOverrideDialogOpen.value = false;
+	if (resolver) resolver(result);
+};
+
+const requestBelowCostOverride = async (risks) => {
+	if (isOffline()) {
+		toastStore.show({
+			title: __("POS supervisor overrides require an online server connection."),
+			color: "error",
+		});
+		return { approved: false };
+	}
+	if (!currentCashier.value?.can_override_below_cost) {
+		toastStore.show({
+			title: __("Switch to a POS supervisor to approve this sale."),
+			color: "error",
+		});
+		return { approved: false };
+	}
+	belowCostOverrideRisks.value = Array.isArray(risks) ? risks : [];
+	belowCostOverrideReason.value = "";
+	belowCostOverrideDialogOpen.value = true;
+	return await new Promise((resolve) => {
+		belowCostOverrideResolver = resolve;
+	});
+};
+
+const approveBelowCostOverride = () => {
+	const reason = String(belowCostOverrideReason.value || "").trim();
+	if (!reason) return;
+	resolveBelowCostOverride({ approved: true, reason });
+};
+
+const cancelBelowCostOverride = () => {
+	resolveBelowCostOverride({ approved: false });
+};
+
+const paymentItemDiscountTotal = computed(() => {
+	const items = Array.isArray(invoice_doc.value?.items) ? invoice_doc.value.items : [];
+
+	const total = items.reduce((sum, item) => {
+		const qty = Math.abs(flt(item?.qty || 0, currency_precision.value));
+		const explicitDiscount = Math.abs(flt(item?.discount_amount || 0, currency_precision.value));
+		const rateDiscount =
+			explicitDiscount > 0
+				? explicitDiscount
+				: Math.max(
+						flt(item?.price_list_rate || 0, currency_precision.value) -
+							flt(item?.rate || 0, currency_precision.value),
+						0,
+					);
+
+		return sum + qty * rateDiscount;
+	}, 0);
+
+	return flt(total, currency_precision.value);
+});
 
 const displayCurrency = computed(() => (invoice_doc.value ? invoice_doc.value.currency : ""));
+const companyCurrency = computed(
+	() =>
+		uiStore.companyDoc?.default_currency ||
+		pos_profile.value?.currency ||
+		invoice_doc.value?.currency ||
+		"",
+);
 const isPaymentOpen = computed(() => activeView.value === "payment" || paymentDialogOpen.value);
 const netInvoiceSettlementAmount = computed(() => {
 	if (!invoice_doc.value) return 0;
 
-	const invoiceTotal = flt(
+	const rawInvoiceTotal = flt(
 		invoice_doc.value.rounded_total || invoice_doc.value.grand_total,
 		currency_precision.value,
 	);
+	const invoiceTotal = invoice_doc.value.is_return
+		? rawInvoiceTotal
+		: Math.max(
+				rawInvoiceTotal -
+					Math.max(0, flt(invoice_doc.value.posa_exchange_credit || 0, currency_precision.value)),
+				0,
+			);
 	const coveredAmount = flt(
 		(invoice_doc.value?.loyalty_amount || loyalty_amount.value || 0) +
 			(redeemed_customer_credit.value || 0),
 		currency_precision.value,
 	);
 
-	return Math.max(invoiceTotal - coveredAmount, 0);
+	const net = invoiceTotal - coveredAmount;
+	return invoice_doc.value?.is_return ? Math.min(net, 0) : Math.max(net, 0);
 });
 
 const validatePayment = computed(() => {
@@ -458,11 +715,85 @@ const paymentCalculations = usePaymentCalculations({
 	redeemedCustomerCredit: redeemed_customer_credit,
 	customerCreditDict: customer_credit_dict,
 	customerInfo: customer_info,
+	giftCardRedemptions,
 	formatCurrency: (val, _curr) => formatCurrency(val, currency_precision.value),
 });
+const netCompanySettlementAmount = computed(() => {
+	if (!invoice_doc.value) return 0;
+	const doc = invoice_doc.value;
+	const companyTotal = flt(
+		doc.base_rounded_total ||
+			doc.base_grand_total ||
+			toCompanyCurrency(paymentCurrencyContext(doc), doc.rounded_total || doc.grand_total),
+		currency_precision.value,
+	);
+	const exchangeCreditCompany = toCompanyCurrency(
+		paymentCurrencyContext(doc),
+		Math.max(0, Number(doc.posa_exchange_credit || 0)),
+	);
+	const giftCardInvoiceAmount = (
+		Array.isArray(giftCardRedemptions.value) ? giftCardRedemptions.value : []
+	).reduce((sum, row) => sum + Number(row?.amount || 0), 0);
+	const coveredCompanyAmount =
+		Number(doc.loyalty_amount || loyalty_amount.value || 0) +
+		Number(redeemed_customer_credit.value || 0) +
+		toCompanyCurrency(paymentCurrencyContext(doc), giftCardInvoiceAmount);
+	const net = flt(companyTotal - exchangeCreditCompany - coveredCompanyAmount, currency_precision.value);
+	return doc.is_return ? Math.min(net, 0) : Math.max(net, 0);
+});
 
-const { diff_payment, total_payments, total_payments_display, diff_payment_display, diff_label, change_due } =
-	paymentCalculations;
+const {
+	multiCurrencyEnabled,
+	allowCurrencySelection,
+	allowManualRate,
+	allowedPaymentCurrencies,
+	initializePayments,
+	normalizePayment,
+	updateOriginalAmount,
+	updateCurrency: updatePaymentCurrency,
+	setInvoiceEquivalent,
+	clearPayment: clearPaymentCurrency,
+} = usePaymentCurrencies({
+	invoiceDoc: computed(() => invoiceStore.invoiceDoc),
+	posProfile: pos_profile,
+	currencyPrecision: currency_precision,
+	formatFloat: (value, precision) => flt(value, precision),
+});
+
+const {
+	diff_payment,
+	total_payments,
+	total_payments_display,
+	diff_payment_display,
+	diff_label,
+	change_due,
+	base_settlement,
+} = paymentCalculations;
+
+const {
+	featureEnabled: changeCurrencyEnabled,
+	allowedChangeCurrencies,
+	rows: changeReturnRows,
+	remainingChange,
+	addRow: addChangeReturnRow,
+	removeRow: removeChangeReturnRow,
+	updateRowAmount,
+	updateRowCurrency,
+} = useChangeCurrencies({
+	invoiceDoc: computed(() => invoiceStore.invoiceDoc),
+	posProfile: pos_profile,
+	changeDue: change_due,
+	currencyPrecision: currency_precision,
+	formatFloat: (value, precision) => flt(value, precision),
+});
+
+const handleChangeReturnAmount = (row, event) => {
+	const raw = event?.target?.value ?? event;
+	void updateRowAmount(row, raw);
+};
+const handleChangeReturnCurrency = (row, currency) => {
+	void updateRowCurrency(row, currency);
+};
 
 const {
 	phone_dialog,
@@ -472,8 +803,9 @@ const {
 	set_mpesa_payment,
 	set_full_amount,
 	set_rest_amount,
+	toggle_remainder_lock,
+	clear_all_amounts,
 	request_payment,
-	autoBalancePayments,
 	getVisibleDenominations,
 	isCashLikePayment,
 } = usePaymentMethods({
@@ -481,6 +813,7 @@ const {
 	posProfile: pos_profile,
 	diffPayment: diff_payment,
 	getNetInvoiceAmount: () => netInvoiceSettlementAmount.value,
+	getNetCompanyAmount: () => netCompanySettlementAmount.value,
 	formatFloat: (val) => flt(val, currency_precision.value),
 	stores: {
 		toastStore,
@@ -504,6 +837,7 @@ const {
 						loadPrintPage({
 							doc,
 							doctype: printOptions.doctype,
+							name: printOptions.name,
 						});
 					}
 				}
@@ -523,6 +857,8 @@ const {
 	getPaidChange: () => paid_change.value,
 	getCreditChange: () => credit_change.value,
 	onBackToInvoice: () => eventBus.emit("change_active_view", "Invoice"),
+	onPaymentInvoiceAmountChanged: setInvoiceEquivalent,
+	onPaymentCleared: clearPaymentCurrency,
 });
 
 const {
@@ -561,54 +897,317 @@ const {
 	eventBus: eventBus,
 });
 
-const { ensureReturnPaymentsAreNegative, restoreReturnPayments, validateSubmission, submitInvoice } = usePaymentSubmission({
-	invoiceDoc: computed(() => invoiceStore.invoiceDoc),
-	posProfile: pos_profile,
-	stockSettings: stock_settings,
-	invoiceType: invoiceType,
-	is_write_off_change: is_write_off_change,
-	isCashback: is_cashback,
-	paidChange: paid_change,
-	creditChange: credit_change,
-	redeemedCustomerCredit: redeemed_customer_credit,
-	customerCreditDict: customer_credit_dict,
-	diff_payment: diff_payment,
-	is_credit_sale: is_credit_sale,
-	loyaltyAmount: loyalty_amount,
-	formatFloat: (val, prec) => flt(val, prec),
-	stores: {
-		toastStore,
-		syncStore,
-		customersStore,
-		uiStore,
-		invoiceStore,
-	},
-	currencyPrecision: currency_precision,
-});
+const { ensureReturnPaymentsAreNegative, restoreReturnPayments, validateSubmission, submitInvoice } =
+	usePaymentSubmission({
+		invoiceDoc: computed(() => invoiceStore.invoiceDoc),
+		posProfile: pos_profile,
+		stockSettings: stock_settings,
+		invoiceType: invoiceType,
+		is_write_off_change: is_write_off_change,
+		isCashback: is_cashback,
+		paidChange: paid_change,
+		creditChange: credit_change,
+		redeemedCustomerCredit: redeemed_customer_credit,
+		customerCreditDict: customer_credit_dict,
+		giftCardRedemptions: giftCardRedemptions,
+		diff_payment: diff_payment,
+		is_credit_sale: is_credit_sale,
+		loyaltyAmount: loyalty_amount,
+		customerInfo: customer_info,
+		formatFloat: (val, prec) => flt(val, prec),
+		stores: {
+			toastStore,
+			syncStore,
+			customersStore,
+			uiStore,
+			invoiceStore,
+			employeeStore,
+		},
+		currencyPrecision: currency_precision,
+		requestBelowCostOverride,
+		exchangeSession,
+	});
+
+const isGiftCardPayment = (payment) => {
+	if (!pos_profile.value?.posa_use_gift_cards) {
+		return false;
+	}
+	return String(payment?.mode_of_payment || "")
+		.trim()
+		.toLowerCase()
+		.includes("gift");
+};
+
+const visiblePaymentMethods = computed(() =>
+	(Array.isArray(invoice_doc.value?.payments) ? invoice_doc.value.payments : []).filter(
+		(payment) => !isGiftCardPayment(payment),
+	),
+);
+
+const creditSaleAllowed = computed(() => parseBooleanSetting(pos_profile.value?.posa_allow_credit_sale));
+
+const giftCardAppliedAmount = computed(() =>
+	(Array.isArray(giftCardRedemptions.value) ? giftCardRedemptions.value : []).reduce(
+		(sum, row) => sum + flt(row?.amount || 0, currency_precision.value),
+		0,
+	),
+);
+
+const resetGiftCardState = ({ clearPayment = false } = {}) => {
+	giftCardDialogOpen.value = false;
+	giftCardInlineExpanded.value = false;
+	giftCardCode.value = "";
+	giftCardAmount.value = 0;
+	giftCardBalance.value = 0;
+	giftCardStatus.value = "";
+	giftCardLoading.value = false;
+	giftCardMode.value = "redeem";
+	giftCardError.value = "";
+	giftCardRedemptions.value = [];
+	if (clearPayment && activeGiftCardPayment.value) {
+		activeGiftCardPayment.value.amount = 0;
+		if (activeGiftCardPayment.value.base_amount !== undefined) {
+			activeGiftCardPayment.value.base_amount = 0;
+		}
+	}
+	activeGiftCardPayment.value = null;
+};
+
+const setGiftCardMode = (mode) => {
+	giftCardMode.value = mode || "redeem";
+	giftCardError.value = "";
+};
+
+const getGiftCardRemainingAmount = () => {
+	const flexiblePayment =
+		activeGiftCardPayment.value || resolvePreferredPaymentLine(invoice_doc.value, isCashLikePayment);
+	const payments = Array.isArray(invoice_doc.value?.payments) ? invoice_doc.value.payments : [];
+	const otherPaymentsTotal = payments.reduce((sum, payment) => {
+		if (!payment || payment === flexiblePayment) {
+			return sum;
+		}
+		return sum + flt(payment.amount || 0, currency_precision.value);
+	}, 0);
+	return Math.max(flt(netInvoiceSettlementAmount.value - otherPaymentsTotal, currency_precision.value), 0);
+};
+
+const clearGiftCardRedemption = () => {
+	if (activeGiftCardPayment.value) {
+		activeGiftCardPayment.value.amount = 0;
+		if (activeGiftCardPayment.value.base_amount !== undefined) {
+			activeGiftCardPayment.value.base_amount = 0;
+		}
+	}
+	giftCardRedemptions.value = [];
+	giftCardCode.value = "";
+	giftCardAmount.value = 0;
+	giftCardBalance.value = 0;
+	giftCardStatus.value = "";
+	giftCardError.value = "";
+	giftCardInlineExpanded.value = false;
+	rebalancePreferredPaymentCoverage(0);
+};
+
+const toggleGiftCardInline = () => {
+	giftCardInlineExpanded.value = !giftCardInlineExpanded.value;
+	activeGiftCardPayment.value = null;
+	if (giftCardInlineExpanded.value) {
+		giftCardCode.value = giftCardRedemptions.value[0]?.gift_card_code || giftCardCode.value || "";
+		giftCardAmount.value = flt(
+			giftCardRedemptions.value[0]?.amount || giftCardAmount.value || 0,
+			currency_precision.value,
+		);
+	} else {
+		giftCardError.value = "";
+	}
+};
+
+const openGiftCardDialog = (payment = null) => {
+	activeGiftCardPayment.value = payment;
+	giftCardDialogOpen.value = true;
+	giftCardCode.value = giftCardRedemptions.value[0]?.gift_card_code || "";
+	giftCardAmount.value = flt(
+		giftCardRedemptions.value[0]?.amount || payment?.amount || 0,
+		currency_precision.value,
+	);
+	giftCardBalance.value = flt(giftCardBalance.value || 0, currency_precision.value);
+	giftCardStatus.value = giftCardStatus.value || "";
+	giftCardMode.value = "redeem";
+	giftCardError.value = "";
+};
+
+const checkGiftCardBalance = async () => {
+	if (!giftCardCode.value || !pos_profile.value?.company) {
+		giftCardError.value = __("Gift card code is required.");
+		return;
+	}
+
+	if (isOffline()) {
+		const cached = getCachedGiftCardSnapshot(giftCardCode.value);
+		if (!cached) {
+			giftCardError.value = __("No cached gift card balance is available offline.");
+			return;
+		}
+		giftCardBalance.value = flt(cached.current_balance || 0, currency_precision.value);
+		giftCardStatus.value = cached.status || "";
+		return;
+	}
+
+	giftCardLoading.value = true;
+	giftCardError.value = "";
+	try {
+		const response = await frappe.call({
+			method: "posawesome.posawesome.api.gift_cards.check_gift_card_balance",
+			args: {
+				gift_card_code: giftCardCode.value,
+				company: pos_profile.value.company,
+			},
+		});
+		const card = response?.message || {};
+		giftCardBalance.value = flt(card.current_balance || 0, currency_precision.value);
+		giftCardStatus.value = card.status || "";
+		saveGiftCardSnapshot(giftCardCode.value, card);
+		if (!giftCardAmount.value && giftCardMode.value === "redeem") {
+			giftCardAmount.value = Math.min(giftCardBalance.value, getGiftCardRemainingAmount());
+		}
+	} catch (error) {
+		giftCardError.value = error?.message || __("Unable to load gift card balance.");
+	}
+	giftCardLoading.value = false;
+};
+
+const applyGiftCardRedemption = async () => {
+	if (!giftCardBalance.value || !giftCardStatus.value) {
+		await checkGiftCardBalance();
+		if (!giftCardBalance.value || giftCardError.value) {
+			return;
+		}
+	}
+
+	const nextAmount = Math.min(
+		flt(giftCardAmount.value || 0, currency_precision.value),
+		giftCardBalance.value,
+		getGiftCardRemainingAmount(),
+	);
+
+	if (nextAmount <= 0) {
+		giftCardError.value = __("Gift card amount must be greater than zero.");
+		return;
+	}
+
+	if (activeGiftCardPayment.value) {
+		activeGiftCardPayment.value.amount = 0;
+		if (activeGiftCardPayment.value.base_amount !== undefined) {
+			activeGiftCardPayment.value.base_amount = 0;
+		}
+	}
+	giftCardRedemptions.value = [
+		{
+			gift_card_code: giftCardCode.value,
+			amount: nextAmount,
+			cashier: currentCashier.value?.user || null,
+		},
+	];
+	rebalancePreferredPaymentCoverage(nextAmount);
+	giftCardInlineExpanded.value = false;
+	giftCardDialogOpen.value = false;
+};
+
+const issueGiftCard = async () => {
+	if (!currentCashier.value?.is_supervisor) {
+		giftCardError.value = __("A POS supervisor is required for this action.");
+		return;
+	}
+	giftCardLoading.value = true;
+	giftCardError.value = "";
+	try {
+		const response = await frappe.call({
+			method: "posawesome.posawesome.api.gift_cards.issue_gift_card",
+			args: {
+				pos_profile: pos_profile.value?.name,
+				cashier: currentCashier.value?.user,
+				company: pos_profile.value?.company,
+				initial_amount: flt(giftCardAmount.value || 0, currency_precision.value),
+				gift_card_code: giftCardCode.value || null,
+				currency: invoice_doc.value?.currency || pos_profile.value?.currency,
+			},
+		});
+		const card = response?.message || {};
+		giftCardCode.value = card.gift_card_code || giftCardCode.value;
+		giftCardBalance.value = flt(card.current_balance || 0, currency_precision.value);
+		giftCardStatus.value = card.status || "Active";
+		giftCardMode.value = "redeem";
+	} catch (error) {
+		giftCardError.value = error?.message || __("Unable to issue gift card.");
+	}
+	giftCardLoading.value = false;
+};
+
+const topUpGiftCard = async () => {
+	if (!currentCashier.value?.is_supervisor) {
+		giftCardError.value = __("A POS supervisor is required for this action.");
+		return;
+	}
+	giftCardLoading.value = true;
+	giftCardError.value = "";
+	try {
+		const response = await frappe.call({
+			method: "posawesome.posawesome.api.gift_cards.top_up_gift_card",
+			args: {
+				pos_profile: pos_profile.value?.name,
+				cashier: currentCashier.value?.user,
+				gift_card_code: giftCardCode.value,
+				amount: flt(giftCardAmount.value || 0, currency_precision.value),
+			},
+		});
+		const card = response?.message || {};
+		giftCardBalance.value = flt(card.current_balance || 0, currency_precision.value);
+		giftCardStatus.value = card.status || "Active";
+		giftCardMode.value = "redeem";
+	} catch (error) {
+		giftCardError.value = error?.message || __("Unable to top up gift card.");
+	}
+	giftCardLoading.value = false;
+};
 
 // Methods
 
-const get_print_formats = () => {
-	frappe.call({
-		method: "posawesome.posawesome.api.print_formats.get_print_formats",
-		args: { doctype: "Sales Invoice" },
-		callback: (r) => {
-			const formats = r.message || [];
-			print_formats.value = formats.map((pf) => (typeof pf === "object" && pf.name ? pf.name : pf));
-		},
+const get_print_formats = async () => {
+	const doctypes = resolvePaymentPrintFormatDoctypes({
+		profile: pos_profile.value,
+		invoiceType: invoiceType.value,
 	});
+
+	try {
+		const responses = await Promise.all(
+			doctypes.map((doctype) =>
+				frappe.call({
+					method: "posawesome.posawesome.api.print_formats.get_print_formats",
+					args: { doctype },
+				}),
+			),
+		);
+
+		const mergedFormats = responses
+			.flatMap((response) => response?.message || [])
+			.map((pf) => (typeof pf === "object" && pf.name ? pf.name : pf))
+			.filter(Boolean);
+
+		print_formats.value = Array.from(new Set(mergedFormats));
+		set_print_format();
+	} catch (error) {
+		console.error("Failed to fetch payment print formats", error);
+		print_formats.value = [];
+		set_print_format();
+	}
 };
 
 const set_print_format = () => {
-	print_format.value = "";
-	if (pos_profile.value.posa_print_format_rules && customer_info.value) {
-		const rule = pos_profile.value.posa_print_format_rules.find(
-			(r) => r.customer_group === customer_info.value.customer_group,
-		);
-		if (rule) {
-			print_format.value = rule.print_format;
-		}
-	}
+	print_format.value = resolvePaymentPrintFormat({
+		profile: pos_profile.value,
+		customerInfo: customer_info.value,
+		availableFormats: print_formats.value,
+	});
 };
 
 const releaseActiveFocus = () => {
@@ -697,7 +1296,7 @@ const finishSubmissionNavigation = (clearInvoice = false) => {
 		invoiceStore.clear();
 		invoiceStore.resetPostingDate();
 		if (eventBus && typeof eventBus.emit === "function") {
-			eventBus.emit("clear_invoice");
+			eventBus.emit("clear_invoice", { resetCurrency: true });
 		}
 
 		if (submittedType !== "Invoice") {
@@ -710,9 +1309,7 @@ const finishSubmissionNavigation = (clearInvoice = false) => {
 };
 
 const buildProfilePaymentLines = () => {
-	const profilePayments = Array.isArray(pos_profile.value?.payments)
-		? pos_profile.value.payments
-		: [];
+	const profilePayments = Array.isArray(pos_profile.value?.payments) ? pos_profile.value.payments : [];
 
 	return profilePayments
 		.filter((payment) => payment?.mode_of_payment)
@@ -722,15 +1319,25 @@ const buildProfilePaymentLines = () => {
 			base_amount: 0,
 			account: payment.account,
 			type: payment.type,
-			default:
-				payment.default === 1 || payment.default === true || index === 0
-					? 1
-					: 0,
+			default: payment.default === 1 || payment.default === true || index === 0 ? 1 : 0,
+			posa_default_payment_currency: payment.posa_default_payment_currency,
+			account_currency: payment.account_currency,
 		}));
 };
 
+const paymentCurrencyContext = (doc = invoice_doc.value) => ({
+	...(doc || {}),
+	pos_profile: pos_profile.value,
+});
+
 const syncPreferredPaymentToCurrentTotal = (doc = invoice_doc.value) => {
-	if (!doc || !Array.isArray(doc.payments) || !doc.payments.length || is_credit_sale.value) {
+	if (
+		!doc ||
+		!Array.isArray(doc.payments) ||
+		!doc.payments.length ||
+		is_credit_sale.value ||
+		is_credit_return.value
+	) {
 		return null;
 	}
 
@@ -756,9 +1363,9 @@ const syncPreferredPaymentToCurrentTotal = (doc = invoice_doc.value) => {
 	}
 
 	const total = netInvoiceSettlementAmount.value;
-	const normalizedTotal = doc.is_return ? -Math.abs(total) : Math.abs(total);
-	const conversionRate = flt(doc.conversion_rate || 1, currency_precision.value);
-
+	// For returns, cap the auto-filled refund at what was paid on the original
+	// invoice (0 for an unpaid/credit invoice → recorded as a credit note).
+	const normalizedTotal = resolveReturnDefaultAmount(doc, total);
 	payments.forEach((payment) => {
 		if (payment !== preferredPayment) {
 			payment.amount = 0;
@@ -771,15 +1378,16 @@ const syncPreferredPaymentToCurrentTotal = (doc = invoice_doc.value) => {
 	preferredPayment.amount = normalizedTotal;
 	if (preferredPayment.base_amount !== undefined) {
 		preferredPayment.base_amount = flt(
-			normalizedTotal * conversionRate,
+			toCompanyCurrency(paymentCurrencyContext(doc), normalizedTotal),
 			currency_precision.value,
 		);
 	}
+	void setInvoiceEquivalent(preferredPayment, normalizedTotal);
 
 	return preferredPayment;
 };
 
-const rebalancePreferredPaymentCoverage = () => {
+const rebalancePreferredPaymentCoverage = (giftCardAmount = giftCardAppliedAmount.value) => {
 	const doc = invoice_doc.value;
 	if (
 		!doc ||
@@ -791,11 +1399,38 @@ const rebalancePreferredPaymentCoverage = () => {
 		return null;
 	}
 
-	return rebalancePreferredPaymentLine(doc, {
+	const payment = rebalancePreferredPaymentLine(doc, {
 		precision: currency_precision.value,
 		isCashLikePayment,
 		loyaltyAmount: invoice_doc.value?.loyalty_amount || loyalty_amount.value,
 		redeemedCustomerCredit: redeemed_customer_credit.value,
+		giftCardAmount,
+	});
+	if (payment) void setInvoiceEquivalent(payment, payment.amount);
+	return payment;
+};
+
+const mergeProfilePaymentsIntoReturn = (doc) => {
+	const profilePayments = buildProfilePaymentLines();
+	if (!profilePayments.length) return;
+
+	if (!Array.isArray(doc.payments)) {
+		doc.payments = [];
+	}
+
+	const existingModes = new Set(doc.payments.map((p) => p?.mode_of_payment).filter(Boolean));
+
+	profilePayments.forEach((pp) => {
+		if (!existingModes.has(pp.mode_of_payment)) {
+			doc.payments.push({
+				mode_of_payment: pp.mode_of_payment,
+				amount: 0,
+				base_amount: 0,
+				default: pp.default,
+				account: pp.account,
+				type: pp.type,
+			});
+		}
 	});
 };
 
@@ -808,6 +1443,26 @@ const ensurePaymentLinesInitialized = (doc = invoice_doc.value) => {
 		const fallbackPayments = buildProfilePaymentLines();
 		if (fallbackPayments.length) {
 			doc.payments = fallbackPayments;
+		}
+	}
+
+	// For returns, always show all profile payment methods so user can split refund
+	// NOTE: the is_credit_return default is decided once when the return is loaded
+	// (send_invoice_doc_payment handler), NOT here — so reopening the dialog or a
+	// failed submit never overrides the cashier's manual toggle. Here we only
+	// honour the current toggle state.
+	if (doc.is_return) {
+		mergeProfilePaymentsIntoReturn(doc);
+		if (is_credit_return.value) {
+			// Credit return: keep every payment row at 0 so it is recorded as a
+			// credit note that reduces the customer's balance (no cash refund).
+			doc.payments.forEach((payment) => {
+				payment.amount = 0;
+				if (payment.base_amount !== undefined) {
+					payment.base_amount = 0;
+				}
+			});
+			return null;
 		}
 	}
 
@@ -826,6 +1481,28 @@ const ensurePaymentLinesInitialized = (doc = invoice_doc.value) => {
 	return initializedPayment;
 };
 
+// Default a return to "Store as Credit?" (is_credit_return) when the original
+// invoice was not fully paid. For an unpaid (credit) invoice this avoids paying
+// out cash that was never collected and instead reduces the customer's balance,
+// while the toggle is visibly ON; a fully paid invoice keeps the normal cash
+// refund. The cap comes from posa_refundable_amount (= amount paid on the
+// original) set when the return is loaded; if unknown we leave behaviour as is.
+const applyReturnCreditDefault = (doc) => {
+	if (!doc || !doc.is_return) {
+		return;
+	}
+	if (!shouldApplyReturnRefundCap(doc)) {
+		is_credit_return.value = false;
+		is_cashback.value = true;
+		return;
+	}
+	const refundable = doc.posa_refundable_amount;
+	const returnTotal = Math.abs(flt(doc.rounded_total || doc.grand_total, currency_precision.value));
+	const shouldCredit = flt(refundable, currency_precision.value) < returnTotal - 0.0001;
+	is_credit_return.value = shouldCredit;
+	is_cashback.value = !shouldCredit;
+};
+
 const restorePaymentLinesAfterFailedSubmit = () => {
 	const doc = invoice_doc.value;
 	if (!doc) {
@@ -836,17 +1513,57 @@ const restorePaymentLinesAfterFailedSubmit = () => {
 	is_credit_sale.value = false;
 };
 
+const enableShortcutCreditSale = () => {
+	if (invoice_doc.value?.is_return) {
+		return false;
+	}
+
+	if (!creditSaleAllowed.value) {
+		toastStore.show({
+			title: __("Credit Sale is not enabled in POS Profile"),
+			color: "error",
+		});
+		frappe.utils.play_sound("error");
+		return false;
+	}
+
+	clear_all_amounts();
+	is_credit_sale.value = true;
+	return true;
+};
+
+const focusSubmitButton = () => {
+	const btn = submitButton.value;
+	const el = btn && btn.$el ? btn.$el : btn;
+	if (!el) {
+		return false;
+	}
+	el.scrollIntoView?.({ behavior: "smooth", block: "center" });
+	el.focus?.();
+	highlightSubmit.value = true;
+	return true;
+};
+
+const focusFirstPaymentTarget = () => {
+	const root = paymentRoot.value;
+	if (
+		focusFirstKeyboardTarget(
+			root,
+			"[data-pos-keyboard-target='payment-amount'], [data-pos-keyboard-target='payment-action']",
+		)
+	) {
+		highlightSubmit.value = false;
+		return true;
+	}
+
+	return focusSubmitButton();
+};
+
 const handleShowPayment = () => {
 	paymentVisible.value = true;
 	nextTick(() => {
 		setTimeout(() => {
-			const btn = submitButton.value;
-			const el = btn && btn.$el ? btn.$el : btn;
-			if (el) {
-				el.scrollIntoView({ behavior: "smooth", block: "center" });
-				el.focus();
-				highlightSubmit.value = true;
-			}
+			focusFirstPaymentTarget();
 			if (eventBus && typeof eventBus.emit === "function") {
 				eventBus.emit("payment_ui_ready");
 			}
@@ -870,18 +1587,16 @@ const handleWriteOffAmountUpdate = (value) => {
 	let nextAmount = flt(value || 0, currency_precision.value);
 	const profileCap = writeOffProfileLimit.value;
 	const diffCap = Math.max(diff_payment.value || 0, 0);
-	const maxAmount =
-		profileCap && profileCap > 0 ? Math.min(diffCap, profileCap) : diffCap;
+	const maxAmount = profileCap && profileCap > 0 ? Math.min(diffCap, profileCap) : diffCap;
 
 	if (nextAmount < 0) {
 		nextAmount = 0;
 	}
 	if (profileCap && profileCap > 0 && nextAmount > profileCap) {
 		toastStore.show({
-			title: __(
-				"Write off amount cannot exceed the POS profile maximum of {0}",
-				[formatCurrency(profileCap)],
-			),
+			title: __("Write off amount cannot exceed the POS profile maximum of {0}", [
+				formatCurrency(profileCap),
+			]),
 			color: "error",
 		});
 		nextAmount = maxAmount;
@@ -925,25 +1640,48 @@ const updateCreditChange = (rawValue) => {
 	}
 };
 
-const handlePaymentAmountChange = (payment, event) => {
-	last_payment_change_was_cash.value = isCashLikePayment(payment);
-	setFormatedCurrency(payment, "amount", null, false, event);
-
-	nextTick(() => {
-		autoBalancePayments(payment);
+const showMissingPaymentRate = (payment) => {
+	toastStore.show({
+		title: __("No exchange rate is available for {0} to {1} on the posting date.", [
+			payment?.posa_payment_currency || "",
+			invoice_doc.value?.currency || "",
+		]),
+		color: "error",
 	});
 };
 
-const setPaymentToDenomination = (payment, amount) => {
-	payment.amount = amount;
-	if (payment.base_amount !== undefined) {
-		const conversion_rate = invoice_doc.value.conversion_rate || 1;
-		payment.base_amount = flt(amount * conversion_rate, currency_precision.value);
-	}
+const handlePaymentAmountChange = async (payment, event) => {
+	payment._posa_auto_remainder = false;
 	last_payment_change_was_cash.value = isCashLikePayment(payment);
-	nextTick(() => {
-		autoBalancePayments(payment);
+	const holder = { value: payment.posa_original_amount ?? payment.amount };
+	setFormatedCurrency(holder, "value", null, false, event);
+	if (!(await updateOriginalAmount(payment, holder.value))) showMissingPaymentRate(payment);
+};
+
+const handlePaymentCurrencyChange = async (payment, currency) => {
+	if (!(await updatePaymentCurrency(payment, currency))) showMissingPaymentRate(payment);
+};
+
+const handlePaymentRateChange = async (payment, event) => {
+	const holder = { value: payment.posa_exchange_rate };
+	setFormatedCurrency(holder, "value", null, false, event);
+	payment.posa_exchange_rate = holder.value;
+	payment.posa_rate_source = "manual";
+	if (!(await normalizePayment(payment))) showMissingPaymentRate(payment);
+};
+
+const handleSetFullAmount = async (payment, isReturn) => {
+	payment._posa_auto_remainder = false;
+	set_full_amount(payment, isReturn);
+	if (!(await setInvoiceEquivalent(payment, payment.amount))) showMissingPaymentRate(payment);
+};
+
+const setPaymentToDenomination = (payment, amount) => {
+	payment._posa_auto_remainder = false;
+	void setInvoiceEquivalent(payment, amount).then((ok) => {
+		if (!ok) showMissingPaymentRate(payment);
 	});
+	last_payment_change_was_cash.value = isCashLikePayment(payment);
 };
 
 // UI Feedback Methods
@@ -959,6 +1697,48 @@ const creditSourceLabel = (row) => {
 	const sourceLabel = row.source_type ? __(row.source_type) : null;
 	if (sourceLabel) return `${sourceLabel}: ${row.credit_origin}`;
 	return row.credit_origin;
+};
+
+const applyPaymentCustomerInfo = (info, customer) => {
+	if (!info) return;
+	const nextInfo = {
+		...info,
+		name: info.name || info.customer || customer,
+		customer: info.customer || info.name || customer,
+	};
+	customer_info.value = nextInfo;
+	customersStore.setCustomerInfo(nextInfo);
+};
+
+const refreshPaymentCustomerInfo = async (doc) => {
+	const customer = typeof doc?.customer === "string" ? doc.customer.trim() : "";
+	if (!customer) {
+		return;
+	}
+
+	const cachedCustomer = await getStoredCustomer(customer);
+	if (cachedCustomer?.name) {
+		applyPaymentCustomerInfo(cachedCustomer, customer);
+	}
+
+	if (isOffline()) {
+		return;
+	}
+
+	try {
+		const result = await frappe.call({
+			method: "posawesome.posawesome.api.customers.get_customer_info",
+			args: {
+				customer,
+				company: pos_profile.value?.company || doc.company || null,
+			},
+		});
+		if (result?.message && !result.exc) {
+			applyPaymentCustomerInfo(result.message, customer);
+		}
+	} catch (error) {
+		console.error("Failed to refresh payment customer loyalty details", error);
+	}
 };
 
 const showDiffPayment = () => {
@@ -989,9 +1769,7 @@ const clearBackgroundStatusCheck = () => {
 const resolveSubmittedDoctype = (doctype) => {
 	if (doctype) return doctype;
 	if (invoice_doc.value?.doctype) return invoice_doc.value.doctype;
-	return pos_profile.value?.create_pos_invoice_instead_of_sales_invoice
-		? "POS Invoice"
-		: "Sales Invoice";
+	return pos_profile.value?.create_pos_invoice_instead_of_sales_invoice ? "POS Invoice" : "Sales Invoice";
 };
 
 const fetchSubmittedInvoiceDoc = async (invoiceName, doctype) => {
@@ -1135,22 +1913,15 @@ const submitInvoiceWrapper = async (print, callbackOverrides = {}, options = {})
 	loading.value = true;
 	try {
 		await validateSubmission(options.paymentReceived || false);
-		await submitInvoice(print, {
+		const submissionResult = await submitInvoice(print, {
 			onPrint: (doc, printOptions = {}) => {
 				if (print) {
-					if (
-						printOptions.waitForPostSubmitPayments ||
-						printOptions.waitForInvoiceProcessing
-					) {
+					if (printOptions.waitForPostSubmitPayments || printOptions.waitForInvoiceProcessing) {
 						void runDeferredPrintWorkflow({
 							name: printOptions.name || doc?.name,
 							doctype: printOptions.doctype,
-							waitForPostSubmitPayments: Boolean(
-								printOptions.waitForPostSubmitPayments,
-							),
-							waitForInvoiceProcessing: Boolean(
-								printOptions.waitForInvoiceProcessing,
-							),
+							waitForPostSubmitPayments: Boolean(printOptions.waitForPostSubmitPayments),
+							waitForInvoiceProcessing: Boolean(printOptions.waitForInvoiceProcessing),
 						});
 					} else if (isOffline()) {
 						printOfflineInvoice(doc);
@@ -1158,6 +1929,7 @@ const submitInvoiceWrapper = async (print, callbackOverrides = {}, options = {})
 						loadPrintPage({
 							doc,
 							doctype: printOptions.doctype,
+							name: printOptions.name,
 						});
 					}
 				}
@@ -1178,6 +1950,9 @@ const submitInvoiceWrapper = async (print, callbackOverrides = {}, options = {})
 			},
 			...callbackOverrides,
 		});
+		if (submissionResult?.cancelled) {
+			restorePaymentLinesAfterFailedSubmit();
+		}
 	} catch (error) {
 		console.error("Submission failed propagate:", error);
 		restorePaymentLinesAfterFailedSubmit();
@@ -1201,6 +1976,34 @@ const handlePaymentShortcut = (event) => {
 	if (event.repeat) return;
 	if (!paymentVisible.value) return;
 
+	if (props.counterGridMode) {
+		const counterShortcut = resolveCounterGridPaymentShortcut(event, visiblePaymentMethods.value.length);
+		if (counterShortcut) {
+			event.preventDefault();
+			event.stopPropagation();
+			if (counterShortcut.type === "submit") {
+				submit(null, false, counterShortcut.print);
+				return;
+			}
+
+			const payment = visiblePaymentMethods.value[counterShortcut.index];
+			if (!payment) return;
+			if (is_mpesa_c2b_payment(payment)) {
+				mpesa_c2b_dialog(payment);
+				return;
+			}
+			set_full_amount(payment, Boolean(invoice_doc.value?.is_return));
+			nextTick(() => {
+				const card = paymentRoot.value?.querySelector?.(
+					`[data-payment-shortcut-index="${counterShortcut.index + 1}"]`,
+				);
+				const target = card?.querySelector?.("input, button");
+				target?.focus?.();
+			});
+			return;
+		}
+	}
+
 	const isAltOnly = event.altKey && !event.ctrlKey && !event.metaKey;
 	const key = event.key.toLowerCase();
 
@@ -1218,11 +2021,57 @@ const handlePaymentShortcut = (event) => {
 	}
 };
 
-const handleSubmitPaymentShortcut = ({ print = false } = {}) => {
+const handleSubmitPaymentShortcut = async ({ print = false, amount = null } = {}) => {
 	if (!paymentVisible.value || submissionInFlight.value || loading.value) return;
-	nextTick(() => {
-		submit(null, false, print);
-	});
+	const submitShortcut = () => {
+		nextTick(() => {
+			submit(null, false, print);
+		});
+	};
+
+	if (amount !== null) {
+		const shortcutAmount = Number(amount);
+		if (!invoice_doc.value?.is_return && Number.isFinite(shortcutAmount) && shortcutAmount === 0) {
+			if (!enableShortcutCreditSale()) {
+				return;
+			}
+			submitShortcut();
+			return;
+		}
+
+		const applyShortcutAmount = async () => {
+			// The payment dialog may still be normalizing its default amount when
+			// the queued Alt+X / Alt+P tender arrives. Finish that work first, then
+			// make the cashier-entered amount authoritative for both the invoice
+			// amount and the original tender amount.
+			await initializePayments();
+			const preferredPayment = applyPreferredPaymentAmount(
+				invoice_doc.value,
+				shortcutAmount,
+				currency_precision.value,
+				isCashLikePayment,
+			);
+			if (!preferredPayment) {
+				return;
+			}
+			const normalized = await setInvoiceEquivalent(preferredPayment, preferredPayment.amount);
+			if (!normalized) {
+				showMissingPaymentRate(preferredPayment);
+				return;
+			}
+			submitShortcut();
+		};
+
+		if (is_credit_sale.value) {
+			is_credit_sale.value = false;
+			nextTick(() => void applyShortcutAmount());
+		} else {
+			void applyShortcutAmount();
+		}
+		return;
+	}
+
+	submitShortcut();
 };
 
 const queueShortcutSubmit = (payload = {}) => {
@@ -1250,6 +2099,7 @@ watch(
 			stock_settings.value = uiStore.stockSettings || {};
 			get_mpesa_modes();
 			get_print_formats();
+			resetGiftCardState({ clearPayment: true });
 		}
 	},
 	{ immediate: true },
@@ -1258,6 +2108,7 @@ watch(
 watch(
 	invoiceType,
 	(data) => {
+		get_print_formats();
 		if (invoice_doc.value && data !== "Order") {
 			invoice_doc.value.posa_delivery_date = null;
 			invoice_doc.value.posa_notes = null;
@@ -1327,6 +2178,16 @@ watch(paid_change, (newVal) => {
 watch(loyalty_amount, (value) => {
 	if (!invoice_doc.value) return;
 	const amount = parseFloat(value) || 0;
+	if (amount <= 0) {
+		invoice_doc.value.loyalty_amount = 0;
+		invoice_doc.value.redeem_loyalty_points = 0;
+		invoice_doc.value.loyalty_points = 0;
+		if (flt(loyalty_amount.value) !== 0) {
+			loyalty_amount.value = 0;
+		}
+		rebalancePreferredPaymentCoverage();
+		return;
+	}
 	if (amount > available_points_amount.value + 0.001) {
 		invoice_doc.value.loyalty_amount = 0;
 		invoice_doc.value.redeem_loyalty_points = 0;
@@ -1341,12 +2202,8 @@ watch(loyalty_amount, (value) => {
 		invoice_doc.value.redeem_loyalty_points = 1;
 
 		let baseAmount = amount;
-		const docCurrency = invoice_doc.value.currency;
-		const baseCurrency = pos_profile.value.currency;
 
-		if (docCurrency && baseCurrency && docCurrency !== baseCurrency) {
-			baseAmount = amount * (invoice_doc.value.conversion_rate || 1);
-		}
+		baseAmount = toCompanyCurrency(paymentCurrencyContext(), amount);
 
 		invoice_doc.value.loyalty_points = parseInt(
 			baseAmount / (customer_info.value.conversion_factor || 1),
@@ -1378,15 +2235,9 @@ watch(is_credit_sale, (newVal) => {
 	if (!invoice_doc.value || !Array.isArray(invoice_doc.value.payments)) return;
 
 	const doc = invoice_doc.value;
-	const conversionRate = doc.conversion_rate || 1;
 
 	// Always clear all payment methods first to prevent stale paid amounts.
-	doc.payments.forEach((payment) => {
-		payment.amount = 0;
-		if (payment.base_amount !== undefined) {
-			payment.base_amount = 0;
-		}
-	});
+	clear_all_amounts();
 
 	if (!newVal && doc.payments.length) {
 		const amount = flt(doc.rounded_total || doc.grand_total, currency_precision.value);
@@ -1398,7 +2249,10 @@ watch(is_credit_sale, (newVal) => {
 		if (defaultPayment) {
 			defaultPayment.amount = amount;
 			if (defaultPayment.base_amount !== undefined) {
-				defaultPayment.base_amount = flt(amount * conversionRate, currency_precision.value);
+				defaultPayment.base_amount = flt(
+					toCompanyCurrency(paymentCurrencyContext(doc), amount),
+					currency_precision.value,
+				);
 			}
 		}
 	}
@@ -1420,6 +2274,19 @@ watch(is_credit_return, (newVal) => {
 	}
 });
 
+// Keep "Cashback?" and "Store as Credit?" mutually exclusive for a return.
+// The is_credit_return watch already flips is_cashback; this mirrors the other
+// direction so toggling cashback also updates credit (you can't enable both).
+// The reciprocal set lands on a value that is already correct, so the watches
+// settle without looping.
+watch(is_cashback, (newVal) => {
+	if (!invoice_doc.value || !invoice_doc.value.is_return) return;
+	const shouldCredit = !newVal;
+	if (is_credit_return.value !== shouldCredit) {
+		is_credit_return.value = shouldCredit;
+	}
+});
+
 watch(
 	() => invoice_doc.value.customer,
 	(customer, previous) => {
@@ -1428,7 +2295,7 @@ watch(
 			set_print_format();
 		} else if (!customer) {
 			addresses.value = [];
-			print_format.value = "";
+			set_print_format();
 		}
 	},
 );
@@ -1438,10 +2305,14 @@ watch(isPaymentOpen, (isOpen) => {
 		ensurePaymentLinesInitialized();
 		handleShowPayment();
 	} else {
+		if (belowCostOverrideResolver) {
+			resolveBelowCostOverride({ approved: false });
+		}
 		releaseActiveFocus();
 		paymentVisible.value = false;
 		highlightSubmit.value = false;
 		queuedShortcutSubmit.value = null;
+		giftCardDialogOpen.value = false;
 	}
 });
 
@@ -1461,9 +2332,14 @@ watch(
 	},
 );
 
-watch(customerInfo, (newInfo) => {
-	customer_info.value = newInfo || "";
-});
+watch(
+	customerInfo,
+	(newInfo) => {
+		customer_info.value = newInfo || "";
+		set_print_format();
+	},
+	{ immediate: true },
+);
 
 watch(selectedCustomer, (newCustomer, oldCustomer) => {
 	if (newCustomer === oldCustomer) return;
@@ -1472,6 +2348,7 @@ watch(selectedCustomer, (newCustomer, oldCustomer) => {
 	is_cashback.value = true;
 	is_credit_return.value = false;
 	loyalty_amount.value = 0;
+	resetGiftCardState({ clearPayment: true });
 
 	if (invoice_doc.value) {
 		invoice_doc.value.loyalty_amount = 0;
@@ -1492,23 +2369,33 @@ onMounted(() => {
 	if (eventBus) {
 		eventBus.on("send_invoice_doc_payment", (doc) => {
 			invoiceStore.setInvoiceDoc(doc);
+			void refreshPaymentCustomerInfo(doc);
 			paid_change.value = flt(doc.paid_change || 0, currency_precision.value);
 			credit_change.value = flt(doc.credit_change || 0, currency_precision.value);
 			last_payment_change_was_cash.value = null;
 			is_credit_sale.value = false;
 			is_write_off_change.value = false;
 
+			// Decide the credit-return default ONCE, when the return is first
+			// loaded, so reopening the dialog / a failed submit never overrides a
+			// manual toggle change by the cashier.
+			if (doc.is_return) {
+				applyReturnCreditDefault(doc);
+			}
+
 			const initializedPayment = ensurePaymentLinesInitialized(doc);
+			void initializePayments();
 
 			if (doc.is_return) {
 				is_return.value = true;
-				is_credit_return.value = false;
+				// is_credit_return default was applied above on load; don't override.
 			} else if (initializedPayment) {
 				is_credit_return.value = false;
 			}
 			initializeReturnValidity(doc);
 			loyalty_amount.value = 0;
 			redeemed_customer_credit.value = 0;
+			resetGiftCardState({ clearPayment: true });
 			if (doc.customer) {
 				get_addresses();
 			}
@@ -1542,10 +2429,12 @@ onMounted(() => {
 		eventBus.on("submit_payment_shortcut", handleSubmitPaymentShortcut);
 		eventBus.on("clear_invoice", () => {
 			invoiceStore.clear();
+			invoiceStore.clearExchange();
 			invoiceStore.resetPostingDate();
 			is_return.value = false;
 			is_credit_return.value = false;
 			return_valid_upto_date.value = null;
+			resetGiftCardState({ clearPayment: true });
 		});
 	}
 
@@ -1555,6 +2444,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+	resolveBelowCostOverride({ approved: false });
 	eventBus.off("send_invoice_doc_payment");
 	eventBus.off("register_pos_profile");
 	eventBus.off("add_the_new_address");
@@ -1570,6 +2460,10 @@ onBeforeUnmount(() => {
 	if (_shortcutHandlers.value.handlePaymentShortcut) {
 		document.removeEventListener("keydown", _shortcutHandlers.value.handlePaymentShortcut);
 	}
+});
+
+defineExpose({
+	focusFirstPaymentTarget,
 });
 </script>
 
@@ -1600,6 +2494,9 @@ onBeforeUnmount(() => {
 
 .payment-card {
 	padding: var(--pos-space-2);
+	border: 1px solid var(--pos-border-light);
+	background: var(--pos-card-bg) !important;
+	box-shadow: var(--pos-elevation-2);
 }
 
 .payment-card--dialog {
@@ -1640,13 +2537,14 @@ onBeforeUnmount(() => {
 }
 
 .payment-section {
-	background: var(--pos-surface-muted);
-	border: 1px solid var(--pos-border-light);
+	background: var(--pos-surface-raised);
+	border: 1px solid var(--pos-border);
 	border-radius: var(--pos-radius-md);
 	padding: var(--pos-space-3);
 	display: flex;
 	flex-direction: column;
 	gap: var(--pos-space-3);
+	box-shadow: var(--pos-elevation-1);
 }
 
 .payment-sections--dialog .payment-section {
@@ -1675,17 +2573,34 @@ onBeforeUnmount(() => {
 }
 
 .payment-section--summary {
-	background: linear-gradient(
-		180deg,
-		rgba(var(--v-theme-primary), 0.08) 0%,
-		var(--pos-surface-muted) 100%
-	);
+	border-inline-start: 5px solid var(--pos-primary);
+	background:
+		linear-gradient(
+			90deg,
+			color-mix(in srgb, var(--pos-primary-container) 52%, transparent),
+			transparent 42%
+		),
+		var(--pos-surface-raised);
 }
 
 .payment-section__header {
 	display: flex;
-	flex-direction: column;
-	gap: 0;
+	flex-direction: row;
+	align-items: center;
+	gap: var(--pos-space-2);
+	min-height: 28px;
+}
+
+.payment-section__icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 30px;
+	height: 30px;
+	flex: 0 0 30px;
+	border-radius: var(--pos-radius-xs);
+	background: var(--pos-primary-container);
+	color: var(--pos-primary-variant);
 }
 
 .payment-section__subsection {
@@ -1699,7 +2614,7 @@ onBeforeUnmount(() => {
 .payment-section__title {
 	margin: 0;
 	font-size: 1rem;
-	font-weight: 700;
+	font-weight: 650;
 	line-height: 1.2;
 	color: var(--pos-text-primary);
 }
@@ -1716,13 +2631,19 @@ onBeforeUnmount(() => {
 	border-radius: var(--pos-radius-sm);
 }
 
+:deep(.payment-section .v-label),
+:deep(.payment-section .v-field-label) {
+	color: var(--pos-text-secondary) !important;
+	opacity: 1;
+}
+
 .payment-footer {
 	flex: 0 0 auto;
 	position: sticky;
 	bottom: 0;
 	z-index: 8;
-	padding-top: 8px;
-	background: linear-gradient(180deg, rgba(255, 255, 255, 0), var(--pos-surface) 30%);
+	padding: 10px 2px 2px;
+	background: linear-gradient(180deg, transparent, var(--pos-surface) 32%);
 }
 
 .payment-footer--dialog {
@@ -1775,6 +2696,13 @@ onBeforeUnmount(() => {
 
 :deep(.payment-shell--dialog .payment-section .v-label) {
 	font-size: 0.78rem;
+	color: var(--pos-text-secondary) !important;
+	opacity: 1;
+}
+
+:deep(.payment-shell--dialog .payment-section .v-field-label) {
+	color: var(--pos-text-secondary) !important;
+	opacity: 1;
 }
 
 :deep(.payment-shell--dialog .payment-section .v-input) {
@@ -1788,10 +2716,12 @@ onBeforeUnmount(() => {
 
 :deep(.payment-shell--dialog .v-switch .v-label) {
 	font-size: 0.82rem;
+	color: var(--pos-text-secondary) !important;
+	opacity: 1;
 }
 
 .submit-highlight {
-	box-shadow: 0 0 0 4px rgb(var(--v-theme-primary));
+	box-shadow: 0 0 0 4px var(--pos-focus-ring);
 	transition: box-shadow 0.3s ease-in-out;
 }
 
@@ -1849,7 +2779,5 @@ onBeforeUnmount(() => {
 		margin-top: 0;
 		padding-bottom: calc(env(safe-area-inset-bottom) + 4px);
 	}
-
 }
 </style>
-

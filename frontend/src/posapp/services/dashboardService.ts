@@ -180,6 +180,9 @@ export interface PaymentMethodSummaryRow {
 	mode_type?: string;
 	category?: "cash" | "card_online" | "other" | string;
 	amount: number;
+	company_currency_amount?: number;
+	currency?: string;
+	tender_amount?: number;
 	invoice_count?: number;
 	share_pct?: number;
 }

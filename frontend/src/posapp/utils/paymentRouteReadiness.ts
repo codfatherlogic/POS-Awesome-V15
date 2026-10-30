@@ -7,11 +7,10 @@ type PaymentRouteReadinessInput = {
 export function isPaymentRouteLocked({
 	customersLoaded,
 	loadingCustomers,
-	isCustomerBackgroundLoading,
+	isCustomerBackgroundLoading: _isCustomerBackgroundLoading,
 }: PaymentRouteReadinessInput): boolean {
 	return Boolean(
 		loadingCustomers ||
-			isCustomerBackgroundLoading ||
 			!customersLoaded,
 	);
 }

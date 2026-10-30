@@ -47,8 +47,11 @@
 					:pos-profile="posProfile"
 					:context="context"
 					:selected-currency="selectedCurrency"
+					:selected-exchange-rate="selectedExchangeRate"
+					:selected-conversion-rate="selectedConversionRate"
 					:hide-qty-decimals="hideQtyDecimals"
-					:last-invoice-rate="getLastInvoiceRate(item)"
+					:show-rate-info="showRateInfo"
+					:get-item-rate-info="getItemRateInfo"
 					:is-item-highlighted="isItemHighlighted(item)"
 					:currency-symbol="currencySymbol"
 					:format-currency="formatCurrency"
@@ -90,8 +93,11 @@ const props = defineProps({
 	posProfile: { type: Object, default: () => ({}) },
 	context: { type: String, default: "pos" },
 	selectedCurrency: { type: String, default: "" },
+	selectedExchangeRate: { type: Number, default: 1 },
+	selectedConversionRate: { type: Number, default: 1 },
 	hideQtyDecimals: { type: Boolean, default: false },
-	getLastInvoiceRate: { type: Function, required: true },
+	showRateInfo: { type: Boolean, default: true },
+	getItemRateInfo: { type: Function, required: true },
 	isItemHighlighted: { type: Function, required: true },
 	currencySymbol: { type: Function, required: true },
 	formatCurrency: { type: Function, required: true },

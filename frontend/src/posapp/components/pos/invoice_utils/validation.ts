@@ -1,3 +1,5 @@
+import { validateCartBatchSerialAssignments } from "../../../composables/pos/shared/batchSerialValidation";
+
 declare const __: (_text: string, _args?: any[]) => string;
 declare const frappe: any;
 
@@ -77,10 +79,23 @@ export async function validate(context: any) {
 				// Normalize item codes
 				const normalized_return_item_code = item.item_code.trim().toUpperCase();
 
-				// Find matching item in original invoice
-				const original_item = original_items.find(
-					(orig) => orig.item_code.trim().toUpperCase() === normalized_return_item_code,
-				);
+				// Match the original invoice row via its exact reference (set in
+				// Returns.vue), not by item_code alone. A batch-tracked item can span
+				// multiple original rows (one per batch); matching the first row by code
+				// compares the return against the wrong batch's quantity → false
+				// "greater than original quantity" error.
+				//
+				// Fall back to item_code ONLY for legacy rows that carry no reference.
+				// When a reference IS present but doesn't resolve, fail closed (leave
+				// original_item undefined → "not found" below) instead of falling back
+				// to a fuzzy item_code match that could pick the wrong batch row and
+				// reintroduce the very bug this guards against.
+				const ref_name = item.sales_invoice_item || item.pos_invoice_item;
+				const original_item = ref_name
+					? original_items.find((orig) => orig.name === ref_name)
+					: original_items.find(
+							(orig) => orig.item_code.trim().toUpperCase() === normalized_return_item_code,
+						);
 
 				if (!original_item) {
 					context.toastStore.show({
@@ -124,6 +139,31 @@ export async function validate(context: any) {
 			return false;
 		}
 	}
+	const requiresStockAssignment = !["Order", "Quotation"].includes(
+		context.invoiceType || "Invoice",
+	);
+	if (requiresStockAssignment) {
+		const assignmentIssues = validateCartBatchSerialAssignments(
+			context.items,
+			{ isReturnInvoice: Boolean(context.isReturnInvoice) },
+		);
+		if (assignmentIssues.length) {
+			const issue = assignmentIssues[0];
+			context.toastStore.show({
+				title: __("Batch or serial selection required"),
+				message: issue?.message || "",
+				color: "error",
+			});
+			if (issue?.item?.posa_row_id) {
+				context.eventBus?.emit?.(
+					"open_batch_serial_selector",
+					issue.item.posa_row_id,
+				);
+			}
+			return false;
+		}
+	}
+
 	return true;
 }
 

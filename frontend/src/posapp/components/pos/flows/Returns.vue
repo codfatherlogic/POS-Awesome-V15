@@ -153,7 +153,7 @@
 								clearable
 								type="number"
 								min="0"
-								placeholder="No limit"
+								:placeholder="__('No limit')"
 							></v-text-field>
 						</v-col>
 					</v-row>
@@ -167,21 +167,16 @@
 					<!-- Action buttons -->
 					<v-row class="mt-2 mb-2 returns-actions">
 						<v-col cols="12" sm="4" md="auto">
-							<v-btn
-							block
-							variant="text"
-							color="primary"
-							@click="search_invoices"
-						>
-							<v-icon start>mdi-magnify</v-icon>
-							{{ __("Search") }}
-						</v-btn>
+							<v-btn block variant="text" color="primary" @click="search_invoices">
+								<v-icon start>mdi-magnify</v-icon>
+								{{ __("Search") }}
+							</v-btn>
 						</v-col>
 						<v-col cols="12" sm="4" md="auto">
-						<v-btn block variant="text" color="warning" @click="clear_search">
-							<v-icon start>mdi-refresh</v-icon>
-							{{ __("Clear") }}
-						</v-btn>
+							<v-btn block variant="text" color="warning" @click="clear_search">
+								<v-icon start>mdi-refresh</v-icon>
+								{{ __("Clear") }}
+							</v-btn>
 						</v-col>
 						<v-col
 							cols="12"
@@ -189,14 +184,9 @@
 							md="auto"
 							v-if="pos_profile.posa_allow_return_without_invoice == 1"
 						>
-						<v-btn
-							block
-							variant="text"
-							color="secondary"
-							@click="return_without_invoice"
-						>
-							{{ __("Return without Invoice") }}
-						</v-btn>
+							<v-btn block variant="text" color="secondary" @click="return_without_invoice">
+								{{ __("Return without Invoice") }}
+							</v-btn>
 						</v-col>
 					</v-row>
 
@@ -221,11 +211,15 @@
 											<span>{{ item.name }}</span>
 										</div>
 										<div class="returns-result-card__amount">
-											{{ currencySymbol(item.currency) }}{{ formatCurrency(item.grand_total) }}
+											{{ currencySymbol(item.currency)
+											}}{{ formatCurrency(item.grand_total) }}
 										</div>
 									</div>
 									<div class="returns-result-card__meta">
-										<span>{{ __("Date") }}: {{ formatDateDisplay(item.posting_date) }}</span>
+										<span
+											>{{ __("Date") }}:
+											{{ formatDateDisplay(item.posting_date) }}</span
+										>
 										<span v-if="item.posa_return_valid_upto">
 											{{ __("Valid until") }}:
 											{{ formatDateDisplay(item.posa_return_valid_upto) }}
@@ -323,9 +317,22 @@
 					<v-btn
 						v-if="selected.length"
 						color="success"
-						@click="submit_dialog"
+						variant="tonal"
+						@click="submit_dialog(false)"
 					>
-						{{ __("Select") }}
+						{{ __("Return items") }}
+					</v-btn>
+					<v-btn
+						v-if="
+							selected.length &&
+							pos_profile.posa_allow_item_exchange == 1 &&
+							!pos_profile.create_pos_invoice_instead_of_sales_invoice
+						"
+						color="primary"
+						prepend-icon="mdi-swap-horizontal-bold"
+						@click="submit_dialog(true)"
+					>
+						{{ __("Exchange items") }}
 					</v-btn>
 				</v-card-actions>
 			</v-card>
@@ -712,7 +719,7 @@ export default {
 			this.eventBus.emit("load_return_invoice", data);
 			this.invoicesDialog = false;
 		},
-		async submit_dialog() {
+		async submit_dialog(exchangeMode = false) {
 			if (this.selected.length > 0) {
 				const selectedInvoice = this.selected[0];
 				const doctype =
@@ -784,11 +791,18 @@ export default {
 				invoice_doc.customer = return_doc.customer;
 				invoice_doc.discount_amount = return_doc.discount_amount;
 				invoice_doc.additional_discount_percentage = return_doc.additional_discount_percentage;
+				const normalizeRefundAmount = (value) => {
+					const amount = this.flt(value || 0, this.currency_precision);
+					return amount ? -Math.abs(amount) : 0;
+				};
 				invoice_doc.payments = Array.isArray(return_doc.payments)
 					? return_doc.payments.map((payment) => ({
 							mode_of_payment: payment.mode_of_payment,
-							amount: payment.amount,
-							base_amount: payment.base_amount,
+							amount: normalizeRefundAmount(payment.amount),
+							base_amount:
+								payment.base_amount !== undefined
+									? normalizeRefundAmount(payment.base_amount)
+									: payment.base_amount,
 							default: payment.default,
 							account: payment.account,
 							type: payment.type,
@@ -804,12 +818,24 @@ export default {
 					invoice_doc.grand_total = return_doc.grand_total;
 				}
 
+				// Cap on how much of this return may be refunded as cash. The backend
+				// (get_invoice_for_return) computes it authoritatively as
+				// grand_total - outstanding - returns-already-issued; use it directly
+				// so the rule lives in one place. Fall back to grand - outstanding only
+				// if the field is absent (e.g. an older cached payload).
+				const settled =
+					return_doc.posa_refundable_amount != null
+						? return_doc.posa_refundable_amount
+						: (return_doc.grand_total || 0) - (return_doc.outstanding_amount || 0);
+				const originalPaid = this.flt(settled, this.currency_precision);
+				invoice_doc.posa_refundable_amount = originalPaid > 0 ? originalPaid : 0;
+
 				// These fields ensure proper return handling
 				invoice_doc.update_stock = 1;
 				invoice_doc.pos_profile = this.pos_profile.name;
 				invoice_doc.company = this.company;
 
-				const data = { invoice_doc, return_doc };
+				const data = { invoice_doc, return_doc, exchange_mode: Boolean(exchangeMode) };
 
 				this.eventBus.emit("load_return_invoice", data);
 				this.invoicesDialog = false;

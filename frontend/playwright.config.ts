@@ -46,11 +46,31 @@ function loadLocalEnvFile(filename = ".env.local") {
 loadLocalEnvFile();
 
 const baseURL = process.env.POSA_SMOKE_BASE_URL || "http://127.0.0.1:8000";
+const smokeSessionId = process.env.POSA_SMOKE_SID?.trim();
+const storageState = smokeSessionId
+	? {
+			cookies: [
+				{
+					name: "sid",
+					value: smokeSessionId,
+					domain: new URL(baseURL).hostname,
+					path: "/",
+					expires: -1,
+					httpOnly: true,
+					secure: baseURL.startsWith("https://"),
+					sameSite: "Lax" as const,
+				},
+			],
+			origins: [],
+		}
+	: undefined;
 
 export default defineConfig({
-	testDir: "./tests/smoke",
+	testDir: "./tests",
+	testMatch: ["smoke/**/*.spec.ts", "e2e/**/*.spec.ts"],
 	timeout: 120000,
 	fullyParallel: false,
+	workers: process.env.POSA_E2E_PROVISION_CASHIER === "1" ? 1 : undefined,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
 	reporter: process.env.CI
@@ -58,6 +78,7 @@ export default defineConfig({
 		: "list",
 	use: {
 		baseURL,
+		storageState,
 		trace: "retain-on-failure",
 		screenshot: "only-on-failure",
 		video: "retain-on-failure",

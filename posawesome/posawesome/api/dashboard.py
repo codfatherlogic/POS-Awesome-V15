@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from math import ceil
 from collections import defaultdict
@@ -10,7 +9,13 @@ import frappe
 from frappe import _
 from frappe.utils import add_months, cint, cstr, flt, getdate, now_datetime, nowdate
 
-from .utils import get_active_pos_profile, get_default_warehouse
+from .pos_access import (
+    get_authorized_pos_profile,
+    user_can_manage_pos,
+    user_is_pos_privileged_manager,
+)
+from .terminal_state import get_active_terminal_cashier
+from .utils import get_default_warehouse
 
 INVOICE_SOURCES: tuple[tuple[str, str], ...] = (
     ("Sales Invoice", "Sales Invoice Item"),
@@ -23,15 +28,6 @@ SCOPE_SPECIFIC = "specific"
 DEFAULT_DASHBOARD_SCOPE = SCOPE_ALL
 DEFAULT_LOW_STOCK_THRESHOLD = 10
 
-DASHBOARD_MANAGER_ROLES = {
-    "System Manager",
-    "Accounts Manager",
-    "Sales Manager",
-    "Stock Manager",
-    "POS Manager",
-}
-
-
 def _pick_first_column(doctype: str, candidates: list[str]) -> str | None:
     for fieldname in candidates:
         if frappe.db.has_column(doctype, fieldname):
@@ -39,43 +35,15 @@ def _pick_first_column(doctype: str, candidates: list[str]) -> str | None:
     return None
 
 
-def _resolve_profile(pos_profile: Any) -> dict[str, Any]:
-    profile_name = ""
-
-    if isinstance(pos_profile, dict):
-        profile_name = cstr(pos_profile.get("name")).strip()
-    elif isinstance(pos_profile, str):
-        raw_value = pos_profile.strip()
-        if raw_value:
-            parsed_value: Any = raw_value
-            if raw_value.startswith("{"):
-                try:
-                    parsed_value = json.loads(raw_value)
-                except Exception:
-                    parsed_value = raw_value
-
-            if isinstance(parsed_value, dict):
-                profile_name = cstr(parsed_value.get("name")).strip()
-            elif isinstance(parsed_value, str):
-                profile_name = parsed_value.strip()
-
-    if profile_name:
-        if not frappe.db.exists("POS Profile", profile_name):
-            frappe.throw(_("POS Profile {0} does not exist.").format(profile_name))
-        return frappe.get_cached_doc("POS Profile", profile_name).as_dict()
-
-    active_profile = get_active_pos_profile()
-    if not active_profile:
-        frappe.throw(_("No active POS Profile found for current user."))
-    return active_profile
-
-
-def _check_profile_permission(profile_name: str):
-    if not frappe.has_permission("POS Profile", "read", profile_name):
+def _get_authorized_dashboard_profile(pos_profile: Any) -> tuple[dict[str, Any], str]:
+    profile_doc = get_authorized_pos_profile(pos_profile)
+    cashier = get_active_terminal_cashier(profile_doc.get("name"))
+    if not user_can_manage_pos(cashier):
         frappe.throw(
-            _("You are not permitted to access POS Profile {0}.").format(profile_name),
+            _("A POS supervisor or manager is required for dashboard access."),
             frappe.PermissionError,
         )
+    return profile_doc.as_dict(), cashier
 
 
 def _build_in_filter(column_sql: str, values: list[str]) -> tuple[str, list[str]]:
@@ -147,10 +115,7 @@ def _is_dashboard_enabled(profile_doc: dict[str, Any]) -> bool:
 
 
 def _user_can_view_all_profiles(user: str) -> bool:
-    if user == "Administrator":
-        return True
-    user_roles = set(frappe.get_roles(user))
-    return bool(user_roles & DASHBOARD_MANAGER_ROLES)
+    return user_is_pos_privileged_manager(user)
 
 
 def _normalize_scope(scope: Any, default_scope: str, allow_all_profiles: bool) -> str:
@@ -212,9 +177,7 @@ def _get_assigned_profiles(user: str, company_profiles: list[dict[str, Any]]) ->
         return []
 
     company_profile_names = {profile.get("name") for profile in company_profiles}
-    return sorted(
-        [name for name in allowed_profiles if name in company_profile_names]
-    )
+    return sorted([name for name in allowed_profiles if name in company_profile_names])
 
 
 def _iter_invoice_sources() -> list[tuple[str, str]]:
@@ -264,9 +227,7 @@ def _collect_sales_and_profit(
     if parent_amount_field or parent_net_field:
         sales_expression = f"sum(coalesce(inv.{parent_amount_field}, 0))" if parent_amount_field else "0"
         profit_sales_expression = (
-            f"sum(coalesce(inv.{parent_net_field}, 0))"
-            if parent_net_field
-            else sales_expression
+            f"sum(coalesce(inv.{parent_net_field}, 0))" if parent_net_field else sales_expression
         )
         sales_row = frappe.db.sql(
             f"""
@@ -409,8 +370,7 @@ def _classify_tax_charge_bucket(account_head: str, description: str, charge_type
     if any(token in normalized for token in ("fee", "levy", "surcharge", "cess", "commission")):
         return "fee"
     if any(
-        token in normalized
-        for token in ("tax", "gst", "vat", "sst", "hst", "tds", "withholding", "excise")
+        token in normalized for token in ("tax", "gst", "vat", "sst", "hst", "tds", "withholding", "excise")
     ):
         return "tax"
     if any(token in normalized for token in ("on net total", "on previous row", "on item quantity")):
@@ -468,9 +428,7 @@ def _get_cash_modes(profile_names: list[str]) -> set[str]:
         pluck="posa_cash_mode_of_payment",
     )
     cash_modes.update(
-        cstr(mode_name).strip()
-        for mode_name in configured_cash_modes
-        if cstr(mode_name).strip()
+        cstr(mode_name).strip() for mode_name in configured_cash_modes if cstr(mode_name).strip()
     )
     return cash_modes
 
@@ -518,7 +476,9 @@ def _collect_sales_summary(
     closing_actual_by_mode: dict[str, float] = defaultdict(float)
     mode_names: set[str] = set(cash_modes)
 
-    if frappe.db.exists("DocType", "POS Opening Shift") and frappe.db.exists("DocType", "POS Opening Shift Detail"):
+    if frappe.db.exists("DocType", "POS Opening Shift") and frappe.db.exists(
+        "DocType", "POS Opening Shift Detail"
+    ):
         opening_rows = frappe.db.sql(
             f"""
             select
@@ -544,7 +504,9 @@ def _collect_sales_summary(
             opening_by_mode[mode_name] += amount
             summary["opening_amount"] += amount
 
-    if frappe.db.exists("DocType", "POS Closing Shift") and frappe.db.exists("DocType", "POS Closing Shift Detail"):
+    if frappe.db.exists("DocType", "POS Closing Shift") and frappe.db.exists(
+        "DocType", "POS Closing Shift Detail"
+    ):
         closing_rows = frappe.db.sql(
             f"""
             select
@@ -589,7 +551,9 @@ def _collect_sales_summary(
                 "additional_discount_amount",
             ],
         )
-        tax_field = _pick_first_column(parent_doctype, ["base_total_taxes_and_charges", "total_taxes_and_charges"])
+        tax_field = _pick_first_column(
+            parent_doctype, ["base_total_taxes_and_charges", "total_taxes_and_charges"]
+        )
         change_field = _pick_first_column(parent_doctype, ["base_change_amount", "change_amount"])
 
         amount_expression = f"coalesce(inv.{amount_field}, 0)" if amount_field else "0"
@@ -773,9 +737,7 @@ def _collect_sales_summary(
 
     summary["cash_variance"] = flt(summary["actual_cash"] - summary["expected_cash"])
     invoice_count = cint(summary.get("invoice_count"))
-    summary["average_invoice_value"] = (
-        flt(summary["net_sales"] / invoice_count) if invoice_count > 0 else 0.0
-    )
+    summary["average_invoice_value"] = flt(summary["net_sales"] / invoice_count) if invoice_count > 0 else 0.0
     return summary
 
 
@@ -813,6 +775,7 @@ def _collect_payment_method_report(
     date_to: str,
     limit: int = 20,
 ) -> dict[str, Any]:
+    company_currency = frappe.get_cached_value("Company", company, "default_currency") or ""
     report: dict[str, Any] = {
         "period": {"from": date_from, "to": date_to},
         "totals": {
@@ -838,8 +801,9 @@ def _collect_payment_method_report(
     profile_filter, profile_filter_params = _build_in_filter("inv.pos_profile", profile_names)
     cash_modes = _get_cash_modes(profile_names)
     mode_names: set[str] = set(cash_modes)
-    payment_totals: dict[str, float] = defaultdict(float)
-    payment_invoice_counts: dict[str, int] = defaultdict(int)
+    payment_totals: dict[tuple[str, str], float] = defaultdict(float)
+    payment_tender_totals: dict[tuple[str, str], float] = defaultdict(float)
+    payment_invoice_counts: dict[tuple[str, str], int] = defaultdict(int)
     day_buckets: dict[str, dict[str, Any]] = {}
     totals = report["totals"]
 
@@ -848,7 +812,9 @@ def _collect_payment_method_report(
             "ifnull(inv.is_return, 0)" if frappe.db.has_column(parent_doctype, "is_return") else "0"
         )
         paid_field = _pick_first_column(parent_doctype, ["base_paid_amount", "paid_amount"])
-        outstanding_field = _pick_first_column(parent_doctype, ["base_outstanding_amount", "outstanding_amount"])
+        outstanding_field = _pick_first_column(
+            parent_doctype, ["base_outstanding_amount", "outstanding_amount"]
+        )
         grand_total_field = _pick_first_column(parent_doctype, ["base_grand_total", "grand_total"])
 
         paid_expression = f"coalesce(inv.{paid_field}, 0)" if paid_field else "0"
@@ -948,16 +914,44 @@ def _collect_payment_method_report(
         if not payment_amount_field:
             continue
 
+        has_tender_currency = frappe.db.has_column(
+            payment_child_doctype, "posa_payment_currency"
+        )
+        has_original_amount = frappe.db.has_column(
+            payment_child_doctype, "posa_original_amount"
+        )
+        tender_currency_expression = (
+            "coalesce(nullif(pay.posa_payment_currency, ''), inv.currency)"
+            if has_tender_currency
+            else "inv.currency"
+        )
+        tender_amount_expression = "coalesce(pay.amount, 0)"
+        if has_tender_currency and has_original_amount:
+            tender_amount_expression = """
+                case
+                    when nullif(pay.posa_payment_currency, '') is not null
+                        then coalesce(pay.posa_original_amount, pay.amount, 0)
+                    else coalesce(pay.amount, 0)
+                end
+            """
+
         payment_rows = frappe.db.sql(
             f"""
             select
                 pay.mode_of_payment as mode_of_payment,
+                {tender_currency_expression} as currency,
                 sum(
                     case
                         when {is_return_expression} = 1 then -abs(coalesce(pay.{payment_amount_field}, 0))
                         else coalesce(pay.{payment_amount_field}, 0)
                     end
                 ) as collected_amount,
+                sum(
+                    case
+                        when {is_return_expression} = 1 then -abs({tender_amount_expression})
+                        else {tender_amount_expression}
+                    end
+                ) as tender_amount,
                 count(distinct pay.parent) as invoice_count
             from `tab{payment_child_doctype}` pay
             inner join `tab{parent_doctype}` inv on inv.name = pay.parent
@@ -966,7 +960,7 @@ def _collect_payment_method_report(
               and inv.posting_date between %s and %s
               {profile_filter}
               {_extra_parent_filter(parent_doctype, "inv")}
-            group by pay.mode_of_payment
+            group by pay.mode_of_payment, {tender_currency_expression}
             """,
             (company, date_from, date_to, *profile_filter_params),
             as_dict=True,
@@ -975,9 +969,12 @@ def _collect_payment_method_report(
             mode_name = cstr(pay_row.get("mode_of_payment")).strip()
             if not mode_name:
                 continue
+            tender_currency = cstr(pay_row.get("currency")).strip() or company_currency
+            payment_key = (mode_name, tender_currency)
             mode_names.add(mode_name)
-            payment_totals[mode_name] += flt(pay_row.get("collected_amount"))
-            payment_invoice_counts[mode_name] += cint(pay_row.get("invoice_count"))
+            payment_totals[payment_key] += flt(pay_row.get("collected_amount"))
+            payment_tender_totals[payment_key] += flt(pay_row.get("tender_amount"))
+            payment_invoice_counts[payment_key] += cint(pay_row.get("invoice_count"))
 
         split_rows = frappe.db.sql(
             f"""
@@ -1013,9 +1010,13 @@ def _collect_payment_method_report(
         "other": {"category": "other", "label": _("Other"), "amount": 0.0, "invoice_count": 0},
     }
     method_rows: list[dict[str, Any]] = []
-    for mode_name in sorted(payment_totals.keys(), key=lambda name: abs(flt(payment_totals.get(name))), reverse=True):
-        amount = flt(payment_totals.get(mode_name))
-        invoice_count = cint(payment_invoice_counts.get(mode_name))
+    for payment_key in sorted(
+        payment_totals.keys(), key=lambda key: abs(flt(payment_totals.get(key))), reverse=True
+    ):
+        mode_name, tender_currency = payment_key
+        amount = flt(payment_totals.get(payment_key))
+        tender_amount = flt(payment_tender_totals.get(payment_key))
+        invoice_count = cint(payment_invoice_counts.get(payment_key))
         category = _classify_payment_mode(mode_name, mode_type_map.get(mode_name, ""), cash_modes)
         category_entry = category_totals[category]
         category_entry["amount"] = flt(category_entry["amount"]) + amount
@@ -1027,6 +1028,9 @@ def _collect_payment_method_report(
                 "mode_type": mode_type_map.get(mode_name, ""),
                 "category": category,
                 "amount": amount,
+                "company_currency_amount": amount,
+                "currency": tender_currency,
+                "tender_amount": tender_amount,
                 "invoice_count": invoice_count,
             }
         )
@@ -1039,9 +1043,7 @@ def _collect_payment_method_report(
     method_rows = method_rows[: _coerce_limit(limit, default=20, minimum=1, maximum=200)]
     for row in method_rows:
         row["share_pct"] = (
-            flt((flt(row.get("amount")) / total_collected) * 100)
-            if abs(total_collected) > 0.00001
-            else 0.0
+            flt((flt(row.get("amount")) / total_collected) * 100) if abs(total_collected) > 0.00001 else 0.0
         )
 
     category_rows: list[dict[str, Any]] = []
@@ -1054,9 +1056,7 @@ def _collect_payment_method_report(
                 "label": row.get("label"),
                 "amount": amount,
                 "invoice_count": cint(row.get("invoice_count")),
-                "share_pct": flt((amount / total_collected) * 100)
-                if abs(total_collected) > 0.00001
-                else 0.0,
+                "share_pct": flt((amount / total_collected) * 100) if abs(total_collected) > 0.00001 else 0.0,
             }
         )
 
@@ -1133,7 +1133,10 @@ def _collect_discount_void_return_report(
             ],
         )
         discount_expression = f"abs(coalesce(inv.{discount_field}, 0))" if discount_field else "0"
-        cashier_field = _pick_first_column(parent_doctype, ["owner", "cashier", "modified_by"])
+        cashier_field = _pick_first_column(
+            parent_doctype,
+            ["posa_cashier", "owner", "cashier", "modified_by"],
+        )
         cashier_expression = f"coalesce(inv.{cashier_field}, '')" if cashier_field else "''"
         is_return_expression = (
             "ifnull(inv.is_return, 0)" if frappe.db.has_column(parent_doctype, "is_return") else "0"
@@ -1288,11 +1291,7 @@ def _collect_discount_void_return_report(
                     if item_name_field
                     else "item.item_code"
                 )
-                stock_uom_expression = (
-                    f"coalesce(item.{stock_uom_field}, '')"
-                    if stock_uom_field
-                    else "''"
-                )
+                stock_uom_expression = f"coalesce(item.{stock_uom_field}, '')" if stock_uom_field else "''"
                 return_item_rows = frappe.db.sql(
                     f"""
                     select
@@ -1623,13 +1622,9 @@ def _collect_customer_report(
         )
 
     customer_count = len(customer_rows)
-    repeat_customer_rate = (
-        flt((repeat_customer_count / customer_count) * 100) if customer_count > 0 else 0.0
-    )
+    repeat_customer_rate = flt((repeat_customer_count / customer_count) * 100) if customer_count > 0 else 0.0
     average_purchase_frequency = (
-        flt(sum(repeat_frequency_values) / len(repeat_frequency_values))
-        if repeat_frequency_values
-        else None
+        flt(sum(repeat_frequency_values) / len(repeat_frequency_values)) if repeat_frequency_values else None
     )
 
     report["summary"] = {
@@ -1738,7 +1733,10 @@ def _collect_staff_cashier_performance_report(
         parent_discount_expression = (
             f"abs(coalesce(inv.{parent_discount_field}, 0))" if parent_discount_field else "0"
         )
-        cashier_field = _pick_first_column(parent_doctype, ["owner", "cashier", "modified_by"])
+        cashier_field = _pick_first_column(
+            parent_doctype,
+            ["posa_cashier", "owner", "cashier", "modified_by"],
+        )
         cashier_expression = f"coalesce(inv.{cashier_field}, '')" if cashier_field else "''"
         is_return_expression = (
             "ifnull(inv.is_return, 0)" if frappe.db.has_column(parent_doctype, "is_return") else "0"
@@ -1836,7 +1834,9 @@ def _collect_staff_cashier_performance_report(
                 summary["items_sold"] += flt(row.get("items_sold"))
 
         if not parent_discount_field:
-            item_discount_field = _pick_first_column(child_doctype, ["base_discount_amount", "discount_amount"])
+            item_discount_field = _pick_first_column(
+                child_doctype, ["base_discount_amount", "discount_amount"]
+            )
             if item_discount_field:
                 item_discount_rows = frappe.db.sql(
                     f"""
@@ -1920,9 +1920,7 @@ def _collect_staff_cashier_performance_report(
         return_rate_pct = (
             flt((return_count / total_activity_count) * 100) if total_activity_count > 0 else 0.0
         )
-        void_rate_pct = (
-            flt((void_count / total_activity_count) * 100) if total_activity_count > 0 else 0.0
-        )
+        void_rate_pct = flt((void_count / total_activity_count) * 100) if total_activity_count > 0 else 0.0
         staff_rows.append(
             {
                 "cashier": row.get("cashier"),
@@ -2036,9 +2034,7 @@ def _collect_profitability_report(
             filters={"name": ["in", item_codes]},
             fields=["name", "item_group"],
         )
-        item_meta = {
-            cstr(row.get("name")).strip(): row for row in item_rows if cstr(row.get("name")).strip()
-        }
+        item_meta = {cstr(row.get("name")).strip(): row for row in item_rows if cstr(row.get("name")).strip()}
 
     summary = report["summary"]
     item_rows_out: list[dict[str, Any]] = []
@@ -2323,7 +2319,10 @@ def _collect_branch_location_report(
         is_return_expression = (
             "ifnull(inv.is_return, 0)" if frappe.db.has_column(parent_doctype, "is_return") else "0"
         )
-        cashier_field = _pick_first_column(parent_doctype, ["owner", "cashier", "modified_by"])
+        cashier_field = _pick_first_column(
+            parent_doctype,
+            ["posa_cashier", "owner", "cashier", "modified_by"],
+        )
         cashier_expression = f"coalesce(inv.{cashier_field}, '')" if cashier_field else "''"
 
         sales_rows = frappe.db.sql(
@@ -2607,8 +2606,12 @@ def _collect_tax_charges_report(
     for parent_doctype, _child_doctype in _iter_invoice_sources():
         grand_total_field = _pick_first_column(parent_doctype, ["base_grand_total", "grand_total"])
         net_total_field = _pick_first_column(parent_doctype, ["base_net_total", "net_total"])
-        tax_total_field = _pick_first_column(parent_doctype, ["base_total_taxes_and_charges", "total_taxes_and_charges"])
-        round_off_field = _pick_first_column(parent_doctype, ["base_rounding_adjustment", "rounding_adjustment"])
+        tax_total_field = _pick_first_column(
+            parent_doctype, ["base_total_taxes_and_charges", "total_taxes_and_charges"]
+        )
+        round_off_field = _pick_first_column(
+            parent_doctype, ["base_rounding_adjustment", "rounding_adjustment"]
+        )
         adjustment_field = _pick_first_column(
             parent_doctype,
             [
@@ -2628,21 +2631,11 @@ def _collect_tax_charges_report(
         round_off_expression = f"coalesce(inv.{round_off_field}, 0)" if round_off_field else "0"
         adjustment_expression = f"coalesce(inv.{adjustment_field}, 0)" if adjustment_field else "0"
 
-        signed_grand_total = (
-            f"case when {is_return_expression} = 1 then -abs({grand_total_expression}) else abs({grand_total_expression}) end"
-        )
-        signed_net_total = (
-            f"case when {is_return_expression} = 1 then -abs({net_total_expression}) else abs({net_total_expression}) end"
-        )
-        signed_tax_total = (
-            f"case when {is_return_expression} = 1 then -abs({tax_total_expression}) else abs({tax_total_expression}) end"
-        )
-        signed_adjustment = (
-            f"case when {is_return_expression} = 1 then -abs({adjustment_expression}) else abs({adjustment_expression}) end"
-        )
-        signed_round_off = (
-            f"case when {is_return_expression} = 1 then -abs({round_off_expression}) else {round_off_expression} end"
-        )
+        signed_grand_total = f"case when {is_return_expression} = 1 then -abs({grand_total_expression}) else abs({grand_total_expression}) end"
+        signed_net_total = f"case when {is_return_expression} = 1 then -abs({net_total_expression}) else abs({net_total_expression}) end"
+        signed_tax_total = f"case when {is_return_expression} = 1 then -abs({tax_total_expression}) else abs({tax_total_expression}) end"
+        signed_adjustment = f"case when {is_return_expression} = 1 then -abs({adjustment_expression}) else abs({adjustment_expression}) end"
+        signed_round_off = f"case when {is_return_expression} = 1 then -abs({round_off_expression}) else {round_off_expression} end"
 
         totals_rows = frappe.db.sql(
             f"""
@@ -2880,9 +2873,11 @@ def _collect_tax_charges_report(
                 "label": row.get("label"),
                 "amount": flt(row.get("amount")),
                 "invoice_count": cint(row.get("invoice_count")),
-                "share_pct": flt((flt(row.get("amount")) / total_tax_base) * 100)
-                if abs(total_tax_base) > 0.00001
-                else 0.0,
+                "share_pct": (
+                    flt((flt(row.get("amount")) / total_tax_base) * 100)
+                    if abs(total_tax_base) > 0.00001
+                    else 0.0
+                ),
             }
             for row in tax_head_buckets.values()
             if abs(flt(row.get("amount"))) > 0.00001
@@ -2903,9 +2898,9 @@ def _collect_tax_charges_report(
                 "category": row.get("category"),
                 "amount": flt(row.get("amount")),
                 "invoice_count": cint(row.get("invoice_count")),
-                "share_pct": flt((flt(row.get("amount")) / charge_base) * 100)
-                if abs(charge_base) > 0.00001
-                else 0.0,
+                "share_pct": (
+                    flt((flt(row.get("amount")) / charge_base) * 100) if abs(charge_base) > 0.00001 else 0.0
+                ),
             }
             for row in charge_head_buckets.values()
             if abs(flt(row.get("amount"))) > 0.00001
@@ -3075,9 +3070,7 @@ def _collect_sales_trend(
                 not entry.get("week_start") or start_candidate < cstr(entry.get("week_start"))
             ):
                 entry["week_start"] = start_candidate
-            if end_candidate and (
-                not entry.get("week_end") or end_candidate > cstr(entry.get("week_end"))
-            ):
+            if end_candidate and (not entry.get("week_end") or end_candidate > cstr(entry.get("week_end"))):
                 entry["week_end"] = end_candidate
 
         month_rows = frappe.db.sql(
@@ -3123,9 +3116,7 @@ def _collect_sales_trend(
                 not entry.get("month_start") or start_candidate < cstr(entry.get("month_start"))
             ):
                 entry["month_start"] = start_candidate
-            if end_candidate and (
-                not entry.get("month_end") or end_candidate > cstr(entry.get("month_end"))
-            ):
+            if end_candidate and (not entry.get("month_end") or end_candidate > cstr(entry.get("month_end"))):
                 entry["month_end"] = end_candidate
 
         hour_expression = None
@@ -3172,7 +3163,9 @@ def _collect_sales_trend(
     day_map = {cstr(row.get("date")): flt(row.get("sales")) for row in day_points}
     today_key = str(today)
     yesterday_key = str(today - timedelta(days=1))
-    trend["highlights"]["day_growth_pct"] = _pct_change(day_map.get(today_key, 0.0), day_map.get(yesterday_key, 0.0))
+    trend["highlights"]["day_growth_pct"] = _pct_change(
+        day_map.get(today_key, 0.0), day_map.get(yesterday_key, 0.0)
+    )
 
     if len(week_points) >= 2:
         trend["highlights"]["week_growth_pct"] = _pct_change(
@@ -3355,12 +3348,8 @@ def _collect_item_sales_report(
             continue
 
         estimated_margin = flt(sales_amount - estimated_cost)
-        margin_pct = (
-            flt((estimated_margin / sales_amount) * 100) if abs(sales_amount) > 0.00001 else None
-        )
-        discount_frequency_pct = (
-            flt((discounted_lines / total_lines) * 100) if total_lines > 0 else 0.0
-        )
+        margin_pct = flt((estimated_margin / sales_amount) * 100) if abs(sales_amount) > 0.00001 else None
+        discount_frequency_pct = flt((discounted_lines / total_lines) * 100) if total_lines > 0 else 0.0
 
         items.append(
             {
@@ -3467,10 +3456,22 @@ def _collect_category_brand_variant_report(
     }
 
     category_buckets: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"label": "", "sold_qty": 0.0, "sales_amount": 0.0, "discount_amount": 0.0, "item_codes": set()}
+        lambda: {
+            "label": "",
+            "sold_qty": 0.0,
+            "sales_amount": 0.0,
+            "discount_amount": 0.0,
+            "item_codes": set(),
+        }
     )
     brand_buckets: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"label": "", "sold_qty": 0.0, "sales_amount": 0.0, "discount_amount": 0.0, "item_codes": set()}
+        lambda: {
+            "label": "",
+            "sold_qty": 0.0,
+            "sales_amount": 0.0,
+            "discount_amount": 0.0,
+            "item_codes": set(),
+        }
     )
     variant_buckets: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
@@ -3862,7 +3863,9 @@ def _collect_inventory_status_report(
         sold_qty = flt(sales_row.get("sold_qty"))
         sales_amount = flt(sales_row.get("sales_amount"))
         avg_daily_sales = flt(sold_qty / period_days) if period_days > 0 else 0.0
-        stock_cover_days = flt(actual_qty / avg_daily_sales) if avg_daily_sales > 0 and actual_qty > 0 else None
+        stock_cover_days = (
+            flt(actual_qty / avg_daily_sales) if avg_daily_sales > 0 and actual_qty > 0 else None
+        )
 
         base_entry = {
             "item_code": item_code,
@@ -4033,8 +4036,7 @@ def _collect_stock_movement_report(
         {
             cstr(row.get("voucher_no")).strip()
             for row in sle_rows
-            if cstr(row.get("voucher_type")).strip() == "Stock Entry"
-            and cstr(row.get("voucher_no")).strip()
+            if cstr(row.get("voucher_type")).strip() == "Stock Entry" and cstr(row.get("voucher_no")).strip()
         }
     )
     stock_entry_purpose_map: dict[str, str] = {}
@@ -4054,11 +4056,7 @@ def _collect_stock_movement_report(
         }
 
     item_codes = sorted(
-        {
-            cstr(row.get("item_code")).strip()
-            for row in sle_rows
-            if cstr(row.get("item_code")).strip()
-        }
+        {cstr(row.get("item_code")).strip() for row in sle_rows if cstr(row.get("item_code")).strip()}
     )
     item_name_map: dict[str, str] = {}
     if item_codes and frappe.db.exists("DocType", "Item"):
@@ -4165,7 +4163,9 @@ def _collect_stock_movement_report(
 
     report["day_wise"] = sorted(day_buckets.values(), key=lambda row: cstr(row.get("date")))
     report["recent_movements"] = recent_movements
-    report["summary"] = {key: flt(value) if isinstance(value, float) else value for key, value in summary.items()}
+    report["summary"] = {
+        key: flt(value) if isinstance(value, float) else value for key, value in summary.items()
+    }
     report["summary"]["movement_count"] = cint(summary.get("movement_count"))
     return report
 
@@ -4206,9 +4206,7 @@ def _collect_reorder_purchase_suggestions(
         return report
 
     valuation_expression = (
-        "max(coalesce(item.valuation_rate, 0))"
-        if frappe.db.has_column("Item", "valuation_rate")
-        else "0"
+        "max(coalesce(item.valuation_rate, 0))" if frappe.db.has_column("Item", "valuation_rate") else "0"
     )
     stock_rows = frappe.db.sql(
         f"""
@@ -4233,11 +4231,7 @@ def _collect_reorder_purchase_suggestions(
 
     period_days = max(1, (getdate(date_to) - getdate(date_from)).days + 1)
     item_codes = sorted(
-        {
-            cstr(row.get("item_code")).strip()
-            for row in stock_rows
-            if cstr(row.get("item_code")).strip()
-        }
+        {cstr(row.get("item_code")).strip() for row in stock_rows if cstr(row.get("item_code")).strip()}
     )
     if not item_codes:
         return report
@@ -4261,9 +4255,7 @@ def _collect_reorder_purchase_suggestions(
         filters={"name": ["in", item_codes]},
         fields=item_fields,
     )
-    item_map = {
-        cstr(row.get("name")).strip(): row for row in item_rows if cstr(row.get("name")).strip()
-    }
+    item_map = {cstr(row.get("name")).strip(): row for row in item_rows if cstr(row.get("name")).strip()}
 
     reorder_map: dict[str, dict[str, float]] = {}
     if frappe.db.exists("DocType", "Item Reorder"):
@@ -4357,9 +4349,7 @@ def _collect_reorder_purchase_suggestions(
         if current_qty <= 0:
             urgency = "critical"
         else:
-            stock_cover_days = (
-                flt(current_qty / avg_daily_sales) if avg_daily_sales > 0 else None
-            )
+            stock_cover_days = flt(current_qty / avg_daily_sales) if avg_daily_sales > 0 else None
             if stock_cover_days is not None and stock_cover_days < lead_time_days:
                 urgency = "high"
             elif current_qty <= threshold:
@@ -4459,9 +4449,7 @@ def _collect_supplier_overview_report(
     )
 
     supplier_name_field = (
-        "supplier_name"
-        if frappe.db.has_column("Purchase Invoice", "supplier_name")
-        else "supplier"
+        "supplier_name" if frappe.db.has_column("Purchase Invoice", "supplier_name") else "supplier"
     )
     amount_expression = f"coalesce({amount_field}, 0)"
     paid_expression = f"coalesce({paid_field}, 0)" if paid_field else "0"
@@ -4499,9 +4487,7 @@ def _collect_supplier_overview_report(
     purchase_amount = flt(summary.get("purchase_amount"))
     summary["avg_invoice_value"] = flt(purchase_amount / purchase_count) if purchase_count else 0.0
     summary["pending_ratio_pct"] = (
-        flt((flt(summary["pending_amount"]) / purchase_amount) * 100)
-        if purchase_amount > 0.00001
-        else 0.0
+        flt((flt(summary["pending_amount"]) / purchase_amount) * 100) if purchase_amount > 0.00001 else 0.0
     )
 
     supplier_rows = frappe.db.sql(
@@ -4539,10 +4525,12 @@ def _collect_supplier_overview_report(
                 "paid_amount": flt(row.get("paid_amount")),
                 "pending_amount": pending_amount,
                 "avg_invoice_value": flt(supplier_amount / supplier_count) if supplier_count else 0.0,
-                "share_pct": flt((supplier_amount / purchase_amount) * 100) if purchase_amount > 0.00001 else 0.0,
-                "pending_ratio_pct": flt((pending_amount / supplier_amount) * 100)
-                if supplier_amount > 0.00001
-                else 0.0,
+                "share_pct": (
+                    flt((supplier_amount / purchase_amount) * 100) if purchase_amount > 0.00001 else 0.0
+                ),
+                "pending_ratio_pct": (
+                    flt((pending_amount / supplier_amount) * 100) if supplier_amount > 0.00001 else 0.0
+                ),
                 "last_purchase_date": row.get("last_purchase_date"),
             }
         )
@@ -4624,10 +4612,8 @@ def get_dashboard_data(
     - specific: selected profile_filter.
     """
 
-    user = frappe.session.user
-    current_profile_doc = _resolve_profile(pos_profile)
+    current_profile_doc, user = _get_authorized_dashboard_profile(pos_profile)
     current_profile_name = cstr(current_profile_doc.get("name")).strip()
-    _check_profile_permission(current_profile_name)
 
     profile_scope_enabled = True
     if frappe.db.has_column("POS Profile", "posa_allow_company_dashboard_scope"):
@@ -4643,9 +4629,7 @@ def get_dashboard_data(
     requested_fast_moving_page_size = (
         fast_moving_page_size if fast_moving_page_size is not None else fast_moving_limit
     )
-    fast_moving_page_size = _coerce_limit(
-        requested_fast_moving_page_size, default=10, minimum=1, maximum=100
-    )
+    fast_moving_page_size = _coerce_limit(requested_fast_moving_page_size, default=10, minimum=1, maximum=100)
     fast_moving_page = _coerce_page(fast_moving_page, default=1)
     fast_moving_offset = (fast_moving_page - 1) * fast_moving_page_size
     fast_moving_search = cstr(fast_moving_search).strip()
@@ -4660,9 +4644,7 @@ def get_dashboard_data(
     discount_report_limit = _coerce_limit(discount_report_limit, default=20, minimum=1, maximum=200)
     customer_report_limit = _coerce_limit(customer_report_limit, default=20, minimum=1, maximum=200)
     staff_report_limit = _coerce_limit(staff_report_limit, default=20, minimum=1, maximum=200)
-    profitability_report_limit = _coerce_limit(
-        profitability_report_limit, default=20, minimum=1, maximum=200
-    )
+    profitability_report_limit = _coerce_limit(profitability_report_limit, default=20, minimum=1, maximum=200)
     branch_report_limit = _coerce_limit(branch_report_limit, default=20, minimum=1, maximum=200)
     tax_report_limit = _coerce_limit(tax_report_limit, default=20, minimum=1, maximum=200)
 
@@ -4678,9 +4660,7 @@ def get_dashboard_data(
         sorted(profiles_by_name.keys()) if allow_all_profiles else sorted(set(assigned_profile_names))
     )
     available_profiles = [
-        profiles_by_name[name]
-        for name in available_profile_names
-        if name in profiles_by_name
+        profiles_by_name[name] for name in available_profile_names if name in profiles_by_name
     ]
 
     if requested_scope == SCOPE_SPECIFIC:
@@ -4710,9 +4690,7 @@ def get_dashboard_data(
             selected_profile_names = [current_profile_name]
 
     selected_profiles_before_override = list(selected_profiles)
-    profile_override_enabled = [
-        profile for profile in selected_profiles if _is_dashboard_enabled(profile)
-    ]
+    profile_override_enabled = [profile for profile in selected_profiles if _is_dashboard_enabled(profile)]
     selected_profiles = profile_override_enabled
     selected_profile_names = [profile.get("name") for profile in selected_profiles]
 
@@ -4745,11 +4723,7 @@ def get_dashboard_data(
     enabled = bool(selected_profiles)
     disabled_reason = None
     if not selected_profiles:
-        disabled_reason = (
-            "profile_disabled"
-            if selected_profiles_before_override
-            else "no_profiles_in_scope"
-        )
+        disabled_reason = "profile_disabled" if selected_profiles_before_override else "no_profiles_in_scope"
     profile_label = single_profile.get("name") if single_profile else None
     warehouse_label = warehouses[0] if len(warehouses) == 1 else _("Multiple Warehouses")
 
@@ -5242,9 +5216,9 @@ def get_dashboard_data(
         "page": fast_moving_page,
         "page_size": fast_moving_page_size,
         "total_count": fast_moving_total_count,
-        "total_pages": int(ceil(fast_moving_total_count / fast_moving_page_size))
-        if fast_moving_total_count
-        else 0,
+        "total_pages": (
+            int(ceil(fast_moving_total_count / fast_moving_page_size)) if fast_moving_total_count else 0
+        ),
         "search": fast_moving_search,
     }
     payload["inventory_insights"]["low_stock_items"] = _collect_low_stock_items(

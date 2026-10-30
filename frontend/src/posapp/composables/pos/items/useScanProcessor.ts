@@ -4,9 +4,16 @@ import { perfMarkStart, perfMarkEnd } from "../../../utils/perf";
 import {
 	formatStockShortageError,
 	parseBooleanSetting,
+	shouldBlockSaleForStock,
 } from "../../../utils/stock";
 import { saveItems, savePriceListItems } from "../../../../offline/index";
 import { openItemSelectionDialog } from "../../../utils/itemSelectionDialog";
+import {
+	extractScanAssignmentFromItem,
+	emptyScanAssignment,
+	type ScanAssignment,
+} from "./scanProcessor/scanAssignment";
+import { toCompanyCurrency } from "../../../utils/erpnextCurrency";
 // @ts-ignore
 import placeholderImage from "../../../components/pos/placeholder-image.png";
 
@@ -40,7 +47,10 @@ export interface ScanProcessorContext {
 	float_precision: ComputedRef<number>;
 	hide_qty_decimals: ComputedRef<boolean>;
 	blockSaleBeyondAvailableQty: ComputedRef<boolean>;
-	deferStockValidationToPayment?: ComputedRef<boolean> | Ref<boolean> | boolean;
+	deferStockValidationToPayment?:
+		| ComputedRef<boolean>
+		| Ref<boolean>
+		| boolean;
 	currency_precision: ComputedRef<number>;
 	exchange_rate: ComputedRef<number>;
 	format_currency: (
@@ -99,16 +109,6 @@ export function useScanProcessor(context: ScanProcessorContext) {
 		console.debug(`[POS ScanFlow] ${step}`, payload || {});
 	};
 
-	const isNegativeStockEnabled = (item: any = null) => {
-		const allowNegativeSetting = parseBooleanSetting(
-			context.stock_settings.value?.allow_negative_stock,
-		);
-		const allowNegativeItem = item
-			? parseBooleanSetting(item.allow_negative_stock)
-			: false;
-		return allowNegativeSetting || allowNegativeItem;
-	};
-
 	const isReturnMode = () => {
 		const value = context.isReturnInvoice;
 		if (typeof value === "boolean") return value;
@@ -151,49 +151,8 @@ export function useScanProcessor(context: ScanProcessorContext) {
 		});
 	};
 
-	type ScanAssignment = {
-		serialNo: string | null;
-		batchNo: string | null;
-	};
-
 	type ScanMeta = {
 		isScaleBarcode?: boolean;
-	};
-
-	const extractScanAssignmentFromItem = (
-		item: any,
-		rawCode: string,
-	): ScanAssignment => {
-		const code = String(rawCode || "").trim();
-		if (!item || !code) {
-			return { serialNo: null, batchNo: null };
-		}
-
-		let serialNo: string | null = null;
-		let batchNo: string | null = null;
-
-		if (item.has_serial_no && Array.isArray(item.serial_no_data)) {
-			const serialMatch = item.serial_no_data.find(
-				(row: any) => String(row?.serial_no || "").trim() === code,
-			);
-			if (serialMatch?.serial_no) {
-				serialNo = String(serialMatch.serial_no);
-				if (!batchNo && serialMatch?.batch_no) {
-					batchNo = String(serialMatch.batch_no);
-				}
-			}
-		}
-
-		if (item.has_batch_no && Array.isArray(item.batch_no_data)) {
-			const batchMatch = item.batch_no_data.find(
-				(row: any) => String(row?.batch_no || "").trim() === code,
-			);
-			if (batchMatch?.batch_no) {
-				batchNo = String(batchMatch.batch_no);
-			}
-		}
-
-		return { serialNo, batchNo };
 	};
 
 	const addScannedItemToInvoice = async (
@@ -201,7 +160,7 @@ export function useScanProcessor(context: ScanProcessorContext) {
 		scannedCode: string,
 		qtyFromBarcode: number | null = null,
 		priceFromBarcode: number | null = null,
-		scanAssignment: ScanAssignment = { serialNo: null, batchNo: null },
+		scanAssignment: ScanAssignment = emptyScanAssignment(),
 		scanMeta: ScanMeta = {},
 	) => {
 		logScanFlow("Preparing scanned item add", {
@@ -229,8 +188,9 @@ export function useScanProcessor(context: ScanProcessorContext) {
 			const barcodeMatch = newItem.item_barcode.find(
 				(b: any) => b.barcode === scannedCode,
 			);
-			if (barcodeMatch && barcodeMatch.posa_uom) {
-				newItem.uom = barcodeMatch.posa_uom;
+			const matchedUom = barcodeMatch?.uom;
+			if (barcodeMatch && matchedUom) {
+				newItem.uom = matchedUom;
 
 				// Try fetching the rate for this UOM from the active price list
 				try {
@@ -239,14 +199,14 @@ export function useScanProcessor(context: ScanProcessorContext) {
 						args: {
 							item_code: newItem.item_code,
 							price_list: active_price_list.value,
-							uom: barcodeMatch.posa_uom,
+							uom: matchedUom,
 						},
 					});
 
 					const uomInfo =
 						newItem.item_uoms &&
 						newItem.item_uoms.find(
-							(u: any) => u.uom === barcodeMatch.posa_uom,
+							(u: any) => u.uom === matchedUom,
 						);
 					const conversionFactor =
 						uomInfo && uomInfo.conversion_factor
@@ -328,16 +288,15 @@ export function useScanProcessor(context: ScanProcessorContext) {
 		if (effectivePrice !== null && !Number.isNaN(effectivePrice)) {
 			const parsedPrice = parseFloat(String(effectivePrice));
 			if (!Number.isNaN(parsedPrice)) {
-				const selectedCurrency = context.selected_currency?.value;
-				const companyCurrency = pos_profile.value?.currency;
-				const conversionRate =
-					Number(context.conversion_rate?.value || 1) || 1;
-				const basePrice =
-					selectedCurrency &&
-					companyCurrency &&
-					selectedCurrency !== companyCurrency
-						? parsedPrice * conversionRate
-						: parsedPrice;
+				const basePrice = toCompanyCurrency(
+					{
+						pos_profile: pos_profile.value,
+						currency: context.selected_currency?.value,
+						selected_currency: context.selected_currency?.value,
+						conversion_rate: context.conversion_rate?.value,
+					},
+					parsedPrice,
+				);
 
 				newItem.rate = parsedPrice;
 				newItem.price_list_rate = parsedPrice;
@@ -373,17 +332,17 @@ export function useScanProcessor(context: ScanProcessorContext) {
 					? newItem.actual_qty
 					: null;
 
-		if (
-			!isReturnMode() &&
-			!shouldDeferStockValidation() &&
-			availableQty !== null &&
-			availableQty < requestedQty
-		) {
-			const negativeStockEnabled = isNegativeStockEnabled(newItem);
-			const exceedsAvailable = availableQty < requestedQty;
-			const shouldBlock =
-				(blockSaleBeyondAvailableQty.value && exceedsAvailable) ||
-				(!negativeStockEnabled && exceedsAvailable);
+		if (availableQty !== null) {
+			const shouldBlock = shouldBlockSaleForStock({
+				item: newItem,
+				requestedQty,
+				availableQty,
+				posProfile: pos_profile.value,
+				stockSettings: context.stock_settings.value,
+				blockSaleBeyondAvailableQty: blockSaleBeyondAvailableQty.value,
+				isReturnInvoice: isReturnMode(),
+				deferStockValidationToPayment: shouldDeferStockValidation(),
+			});
 
 			if (shouldBlock) {
 				showScanError({
@@ -399,8 +358,6 @@ export function useScanProcessor(context: ScanProcessorContext) {
 				});
 				return;
 			}
-
-			// Suppress low stock notifications when negative stock is allowed
 		}
 
 		awaitingScanResult.value = true;
@@ -480,7 +437,7 @@ export function useScanProcessor(context: ScanProcessorContext) {
 		let qtyFromBarcode: number | null = null;
 		let priceFromBarcode: number | null = null;
 		let scaleResponse: any = null;
-		let scanAssignment: ScanAssignment = { serialNo: null, batchNo: null };
+		let scanAssignment: ScanAssignment = emptyScanAssignment();
 
 		try {
 			const res = await frappe.call({
@@ -606,12 +563,15 @@ export function useScanProcessor(context: ScanProcessorContext) {
 					if (resolved?.item_code) {
 						searchCode = String(resolved.item_code);
 						if (resolved?.serial_no) {
-							scanAssignment.serialNo = String(resolved.serial_no);
+							scanAssignment.serialNo = String(
+								resolved.serial_no,
+							);
 						}
 						if (resolved?.batch_no) {
 							scanAssignment.batchNo = String(resolved.batch_no);
 						}
-						foundItem = barcodeIndex.lookupItemByBarcode(searchCode);
+						foundItem =
+							barcodeIndex.lookupItemByBarcode(searchCode);
 					}
 				} catch (error) {
 					console.error(
@@ -703,7 +663,8 @@ export function useScanProcessor(context: ScanProcessorContext) {
 					scannedCode,
 				);
 				scanAssignment = {
-					serialNo: scanAssignment.serialNo || localAssignment.serialNo,
+					serialNo:
+						scanAssignment.serialNo || localAssignment.serialNo,
 					batchNo: scanAssignment.batchNo || localAssignment.batchNo,
 				};
 				await addScannedItemToInvoice(

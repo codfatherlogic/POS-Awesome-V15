@@ -98,23 +98,27 @@ class TestGetItemDetailNormalization(unittest.TestCase):
             captured["doc"] = doc
             return {}
 
-        with patch.object(self.details, "get_stock_availability", return_value=0), patch.object(
-            self.details, "get_batches", return_value=[]
-        ), patch.object(self.details.frappe, "get_all", return_value=[]), patch.object(
-            self.details.frappe.db,
-            "get_value",
-            side_effect=lambda doctype, name, field, as_dict=False: (
-                {"max_discount": 0, "allow_negative_stock": 0, "stock_uom": "Nos"}
-                if doctype == "Item" and as_dict
-                else "USD"
+        with (
+            patch.object(self.details, "get_stock_availability", return_value=0),
+            patch.object(self.details, "get_batches", return_value=[]),
+            patch.object(self.details.frappe, "get_all", return_value=[]),
+            patch.object(
+                self.details.frappe.db,
+                "get_value",
+                side_effect=lambda doctype, name, field, as_dict=False: (
+                    {"max_discount": 0, "allow_negative_stock": 0, "stock_uom": "Nos"}
+                    if doctype == "Item" and as_dict
+                    else "USD"
+                ),
             ),
-        ), patch.dict(
-            sys.modules,
-            {
-                "erpnext.stock.get_item_details": types.SimpleNamespace(
-                    get_item_details=fake_get_item_details
-                )
-            },
+            patch.dict(
+                sys.modules,
+                {
+                    "erpnext.stock.get_item_details": types.SimpleNamespace(
+                        get_item_details=fake_get_item_details
+                    )
+                },
+            ),
         ):
             result = self.details.get_item_detail(
                 {"item_code": "ITEM-001", "is_stock_item": 0},
@@ -139,23 +143,27 @@ class TestGetItemDetailNormalization(unittest.TestCase):
             captured["doc"] = doc_arg
             return {}
 
-        with patch.object(self.details, "get_stock_availability", return_value=0), patch.object(
-            self.details, "get_batches", return_value=[]
-        ), patch.object(self.details.frappe, "get_all", return_value=[]), patch.object(
-            self.details.frappe.db,
-            "get_value",
-            side_effect=lambda doctype, name, field, as_dict=False: (
-                {"max_discount": 0, "allow_negative_stock": 0, "stock_uom": "Nos"}
-                if doctype == "Item" and as_dict
-                else "USD"
+        with (
+            patch.object(self.details, "get_stock_availability", return_value=0),
+            patch.object(self.details, "get_batches", return_value=[]),
+            patch.object(self.details.frappe, "get_all", return_value=[]),
+            patch.object(
+                self.details.frappe.db,
+                "get_value",
+                side_effect=lambda doctype, name, field, as_dict=False: (
+                    {"max_discount": 0, "allow_negative_stock": 0, "stock_uom": "Nos"}
+                    if doctype == "Item" and as_dict
+                    else "USD"
+                ),
             ),
-        ), patch.dict(
-            sys.modules,
-            {
-                "erpnext.stock.get_item_details": types.SimpleNamespace(
-                    get_item_details=fake_get_item_details
-                )
-            },
+            patch.dict(
+                sys.modules,
+                {
+                    "erpnext.stock.get_item_details": types.SimpleNamespace(
+                        get_item_details=fake_get_item_details
+                    )
+                },
+            ),
         ):
             self.details.get_item_detail(
                 item,

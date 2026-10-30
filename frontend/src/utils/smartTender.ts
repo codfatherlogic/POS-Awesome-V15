@@ -1,18 +1,6 @@
-export const defaultDenominations: Record<string, number[]> = {
-	PKR: [10, 20, 50, 100, 500, 1000, 5000],
-	INR: [10, 20, 50, 100, 200, 500, 2000],
-	USD: [1, 5, 10, 20, 50, 100],
-	EUR: [5, 10, 20, 50, 100, 200, 500],
-	GBP: [5, 10, 20, 50],
-	AED: [5, 10, 20, 50, 100, 200, 500, 1000],
-	SAR: [1, 5, 10, 50, 100, 500],
-	QAR: [1, 5, 10, 50, 100, 500],
-};
-
-export function getSmartTenderSuggestions(amount: number, currency: string) {
-	const denoms = defaultDenominations[currency] || [
-		1, 5, 10, 20, 50, 100, 500, 1000,
-	];
+export function getSmartTenderSuggestions(amount: number, _currency?: string) {
+	const magnitude = Math.pow(10, Math.max(Math.floor(Math.log10(Math.max(amount, 1))) - 1, 0));
+	const denoms = [1, 2, 5, 10, 20, 50].map((factor) => factor * magnitude);
 	const suggestions = new Set<number>();
 
 	if (amount <= 0) return [];

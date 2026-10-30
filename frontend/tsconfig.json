@@ -1,7 +1,7 @@
 {
   "extends": "@vue/tsconfig/tsconfig.dom.json",
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
@@ -10,8 +10,9 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "lib": [
-      "ESNext",
-      "DOM"
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
     ],
     "skipLibCheck": true,
     "allowJs": true,

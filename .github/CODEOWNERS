@@ -1,0 +1,14 @@
+# Canonical branding and its enforcement contract require repository-owner review.
+/.github/CODEOWNERS @defendicon
+/frontend/src/posapp/config/branding.ts @defendicon
+/frontend/src/posapp/components/navbar/NavbarAppBar.vue @defendicon
+/frontend/tests/branding.spec.ts @defendicon
+/package.json @defendicon
+/electron/ @defendicon
+/posawesome/hooks.py @defendicon
+/posawesome/config/ @defendicon
+/posawesome/fixtures/custom_field.json @defendicon
+/posawesome/patches/restore_pos_awesome_branding.py @defendicon
+/posawesome/patches.txt @defendicon
+/posawesome/posawesome/workspace/pos_awesome/pos_awesome.json @defendicon
+/posawesome/www/ @defendicon

@@ -1,7 +1,10 @@
 import { isOffline } from "../../../../offline/index";
 import { usePricingRulesStore } from "../../../stores/pricingRulesStore.js";
 import { useItemsStore } from "../../../stores/itemsStore.js";
-import { evaluatePricingRules } from "../../../../lib/pricingEngine";
+import {
+	evaluatePricingRules,
+	evaluateTransactionPricingRules,
+} from "../../../../lib/pricingEngine";
 import { _syncAutoFreeLines } from "./free_items";
 
 declare const __: (_text: string, _args?: any[]) => string;
@@ -64,10 +67,17 @@ export function _getPricingContext(context: any) {
 	const customerInfo = context.customer_info || {};
 
 	return {
+		pos_profile: context.pos_profile?.name || doc.pos_profile || null,
 		company: context.pos_profile?.company || doc.company || null,
 		price_list:
 			priceList || context.pos_profile?.selling_price_list || null,
 		currency: selectedCurrency || context.pos_profile?.currency || null,
+		price_list_currency:
+			context.price_list_currency || context.pos_profile?.currency || null,
+		conversion_rate: context.conversion_rate || 1,
+		plc_conversion_rate: context._getPlcConversionRate
+			? context._getPlcConversionRate()
+			: context.plc_conversion_rate || 1,
 		date:
 			context.posting_date ||
 			context.posting_date_display ||
@@ -86,6 +96,14 @@ function syncAutoFreeLines(context: any, freebiesMap: Map<string, any>) {
 		return context._syncAutoFreeLines(freebiesMap);
 	}
 	return _syncAutoFreeLines(context, freebiesMap);
+}
+
+function refreshInvoiceTotals(context: any) {
+	if (typeof context?.invoiceStore?.recalculateTotals === "function") {
+		context.invoiceStore.recalculateTotals();
+	} else if (typeof context?.invoiceStore?.triggerUpdateTotals === "function") {
+		context.invoiceStore.triggerUpdateTotals();
+	}
 }
 
 export async function _ensurePricingRules(context: any, force = false) {
@@ -115,6 +133,65 @@ export function _resolveBaseRate(context: any, item: any) {
 		}
 	}
 	return 0;
+}
+
+export function _resolvePricingAmount(context: any, item: any) {
+	if (!item) {
+		return 0;
+	}
+	const parse = (value) => {
+		const numeric = Number.parseFloat(String(value ?? 0));
+		return Number.isFinite(numeric) ? numeric : null;
+	};
+	const qty = parse(item.qty);
+	if (qty !== null) {
+		return Math.abs(qty * _resolveBaseRate(context, item));
+	}
+	const explicitAmount = [
+		item.base_amount,
+		item.amount !== undefined && context._toBaseCurrency
+			? context._toBaseCurrency(parse(item.amount) ?? 0)
+			: item.amount,
+	]
+		.map(parse)
+		.find((value) => value !== null);
+	if (explicitAmount !== undefined && explicitAmount !== null) {
+		return Math.abs(explicitAmount);
+	}
+	return 0;
+}
+
+export function _resolveCartPricingAmount(context: any) {
+	if (!Array.isArray(context?.items)) {
+		return 0;
+	}
+	return context.items.reduce((total, item) => {
+		if (!item || item.is_free_item || item.auto_free_source) {
+			return total;
+		}
+		return total + _resolvePricingAmount(context, item);
+	}, 0);
+}
+
+export function _resolveCartNetPricingAmount(context: any) {
+	if (!Array.isArray(context?.items)) {
+		return 0;
+	}
+	return context.items.reduce((total, item) => {
+		if (!item || item.is_free_item || item.auto_free_source) {
+			return total;
+		}
+		const qty = Math.abs(Number.parseFloat(String(item.qty ?? 0)) || 0);
+		const explicitBaseRate = Number.parseFloat(String(item.base_rate ?? ""));
+		const baseRate = Number.isFinite(explicitBaseRate)
+			? Math.abs(explicitBaseRate)
+			: Math.abs(
+					context._toBaseCurrency
+						? context._toBaseCurrency(item.rate || 0)
+						: Number(item.rate || 0),
+				);
+		return total + qty * baseRate;
+	}, 0);
 }
 
 export function _resolvePricingQty(context: any, item: any) {
@@ -199,32 +276,42 @@ export function _applyPricingToLine(
 	ctx: any,
 	indexes: any,
 	freebiesMap: Map<string, any>,
+	cartAmount?: number,
+	aggregateItemQty?: number,
+	isAggregateOwner = true,
 ) {
 	if (!item) {
 		return;
 	}
 
-	const manualOverride = item._manual_rate_set === true;
+	const manualOverride =
+		item._manual_rate_set === true && item._manual_rate_set_from_uom !== true;
 	const allowRateUpdate =
 		!item.locked_price && !item.posa_offer_applied && !manualOverride;
 	const rawDocQty = Number.parseFloat(item.qty || 0);
 	const signedDocQty = Number.isFinite(rawDocQty) ? rawDocQty : 0;
-	const docQty = Math.abs(signedDocQty);
+	const lineDocQty = Math.abs(signedDocQty);
 	const rawPricingQty = _resolvePricingQty(context, item);
 	const pricingQty = Number.isFinite(rawPricingQty)
 		? rawPricingQty
 		: signedDocQty;
 	const qty = Math.abs(pricingQty);
+	const docQty = Number.isFinite(aggregateItemQty)
+		? Math.max(lineDocQty, Math.abs(Number(aggregateItemQty)))
+		: lineDocQty;
 
 	if (docQty === 0 && qty === 0) {
 		return;
 	}
 
 	const baseRate = _resolveBaseRate(context, item);
+	const docAmount = _resolvePricingAmount(context, item);
 	const { pricing, freebies } = evaluatePricingRules({
 		item,
 		qty,
 		docQty,
+		docAmount,
+		cartAmount,
 		baseRate,
 		ctx,
 		indexes,
@@ -294,7 +381,7 @@ export function _applyPricingToLine(
 			: baseAmount;
 	}
 
-	if (Array.isArray(freebies)) {
+	if (isAggregateOwner && Array.isArray(freebies)) {
 		freebies.forEach((entry) => {
 			const key = `${entry.rule}::${entry.item_code}::${item.posa_row_id}`;
 			const existing = freebiesMap.get(key) || { qty: 0 };
@@ -319,6 +406,9 @@ export async function applyPricingRulesForCart(context: any, force = false) {
 	if (context.isReturnInvoice) {
 		return;
 	}
+	// POS Profile.ignore_pricing_rule is a document persistence policy: it lets
+	// explicit cashier rates survive ERPNext validation. It must not disable the
+	// cart rule engine; `_manual_rate_set` protects only lines the cashier edits.
 	if (context._applyingPricingRules) {
 		context._pendingPricingRules = true;
 		return;
@@ -354,20 +444,118 @@ export async function _applyLocalPricingRules(context: any, force = false) {
 		}
 		const indexes = store.getIndexes ? store.getIndexes() : {};
 		const freebiesMap = new Map();
+		const cartAmount = _resolveCartPricingAmount(context);
+		let cartQty = 0;
+		const itemQtyTotals = new Map<string, number>();
+		for (const item of context.items) {
+			if (!item || item.is_free_item || item.auto_free_source) continue;
+			const itemCode = String(item.item_code || "");
+			if (!itemCode) continue;
+			const resolvedQty = Math.abs(_resolvePricingQty(context, item));
+			itemQtyTotals.set(
+				itemCode,
+				(itemQtyTotals.get(itemCode) || 0) + resolvedQty,
+			);
+		}
+		const evaluatedFreebieScopes = new Set<string>();
 
 		for (const item of context.items) {
 			if (!item || item.is_free_item) {
 				continue;
 			}
-			_applyPricingToLine(context, item, ctx, indexes, freebiesMap);
+			const resolvedQty = Math.abs(_resolvePricingQty(context, item));
+			cartQty += resolvedQty;
+			const itemCode = String(item.item_code || "");
+			const isAggregateOwner = !evaluatedFreebieScopes.has(itemCode);
+			if (itemCode) evaluatedFreebieScopes.add(itemCode);
+			_applyPricingToLine(
+				context,
+				item,
+				ctx,
+				indexes,
+				freebiesMap,
+				cartAmount,
+				itemQtyTotals.get(itemCode),
+				isAggregateOwner,
+			);
 		}
 
+		const transactionCartAmount = _resolveCartNetPricingAmount(context);
+		const transactionResult = evaluateTransactionPricingRules({
+			cartAmount: transactionCartAmount,
+			cartQty,
+			ctx,
+			indexes,
+		});
+		_applyTransactionPricing(
+			context,
+			transactionResult,
+			transactionCartAmount,
+			freebiesMap,
+		);
+
 		syncAutoFreeLines(context, freebiesMap);
+		refreshInvoiceTotals(context);
 		if (typeof context.$forceUpdate === "function") {
 			context.$forceUpdate();
 		}
 	} catch (error) {
 		console.error("Failed to apply pricing rules locally", error);
+	}
+}
+
+function _applyTransactionPricing(
+	context: any,
+	result: any,
+	baseCartAmount: number,
+	freebiesMap: Map<string, any>,
+) {
+	const applied = Array.isArray(result?.pricing?.applied)
+		? result.pricing.applied
+		: [];
+	const baseDiscount = Math.max(
+		0,
+		Math.min(Number(result?.pricing?.discountPerUnit || 0), baseCartAmount),
+	);
+	const displayDiscount = context._fromBaseCurrency
+		? context._fromBaseCurrency(baseDiscount)
+		: baseDiscount;
+
+	if (applied.length) {
+		context.additional_discount = context.flt
+			? context.flt(displayDiscount, context.currency_precision)
+			: displayDiscount;
+		context.discount_amount = context.additional_discount;
+		context.additional_discount_percentage = baseCartAmount
+			? context.flt
+				? context.flt(
+						(baseDiscount / baseCartAmount) * 100,
+						context.float_precision,
+					)
+				: (baseDiscount / baseCartAmount) * 100
+			: 0;
+		context._pricing_rule_transaction_discount = true;
+		const names = applied.map((detail) => detail.name).filter(Boolean);
+		if (context.invoice_doc) {
+			context.invoice_doc.pricing_rules = JSON.stringify(names);
+			context.invoice_doc.apply_discount_on = "Net Total";
+		}
+	} else if (context._pricing_rule_transaction_discount) {
+		context.additional_discount = 0;
+		context.discount_amount = 0;
+		context.additional_discount_percentage = 0;
+		context._pricing_rule_transaction_discount = false;
+		if (context.invoice_doc) {
+			context.invoice_doc.pricing_rules = null;
+		}
+	}
+
+	for (const entry of result?.freebies || []) {
+		const key = `${entry.rule}::${entry.item_code}::transaction`;
+		freebiesMap.set(key, {
+			...entry,
+			parentRowId: null,
+		});
 	}
 }
 
@@ -511,9 +699,21 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 					Number.isFinite(conversionFactor) && conversionFactor > 0
 						? conversionFactor
 						: undefined,
-				rate: baseRate || 0,
-				price_list_rate: basePriceListRate || 0,
-				discount_amount: baseDiscount || 0,
+				rate: Number.parseFloat(item.rate ?? 0) || 0,
+				price_list_rate:
+					Number.parseFloat(item.price_list_rate ?? 0) || 0,
+				discount_amount:
+					Number.parseFloat(item.discount_amount ?? 0) || 0,
+				base_rate: baseRate || 0,
+				base_price_list_rate: basePriceListRate || 0,
+				base_discount_amount: baseDiscount || 0,
+				amount:
+					Number.parseFloat(item.amount ?? 0) ||
+					(Number.parseFloat(item.rate ?? 0) || 0) *
+						(Number.parseFloat(item.qty ?? 0) || 0),
+				base_amount:
+					Number.parseFloat(item.base_amount ?? 0) ||
+					(baseRate || 0) * (Number.parseFloat(item.qty ?? 0) || 0),
 				discount_percentage:
 					Number.parseFloat(item.discount_percentage || 0) || 0,
 				warehouse: item.warehouse,
@@ -526,6 +726,7 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 
 	if (!paidLines.length) {
 		syncAutoFreeLines(context, freebiesMap);
+		refreshInvoiceTotals(context);
 		if (typeof context.$forceUpdate === "function") {
 			context.$forceUpdate();
 		}
@@ -812,20 +1013,33 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 			return;
 		}
 
-		const baseRate =
-			Number.parseFloat(update.rate ?? item.base_rate ?? 0) || 0;
+		let baseRate =
+			Number.parseFloat(update.base_rate ?? item.base_rate ?? 0) || 0;
 		const basePriceListRate =
 			Number.parseFloat(
-				update.price_list_rate ?? item.base_price_list_rate ?? 0,
+				update.base_price_list_rate ?? item.base_price_list_rate ?? 0,
 			) || 0;
-		const baseDiscount =
+		let baseDiscount =
 			Number.parseFloat(
-				update.discount_amount ?? item.base_discount_amount ?? 0,
+				update.base_discount_amount ?? item.base_discount_amount ?? 0,
 			) || 0;
 		const discountPercentage =
 			Number.parseFloat(
 				update.discount_percentage ?? item.discount_percentage ?? 0,
 			) || 0;
+		const pricingEpsilon = 1e-6;
+		// ERPNext percentage rules do not always include a final rate/amount.
+		// Normalize only the inconsistent full-rate response so reconciliation
+		// cannot undo a valid quantity-threshold discount already shown locally.
+		if (
+			discountPercentage > 0 &&
+			basePriceListRate > 0 &&
+			baseDiscount <= pricingEpsilon &&
+			Math.abs(baseRate - basePriceListRate) <= pricingEpsilon
+		) {
+			baseDiscount = (basePriceListRate * discountPercentage) / 100;
+			baseRate = basePriceListRate - baseDiscount;
+		}
 
 		const priceLocked =
 			item.locked_price === true ||
@@ -840,8 +1054,11 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 				context?.invoice_doc?.return_against,
 		);
 
+		const manualOverride =
+			item._manual_rate_set === true &&
+			item._manual_rate_set_from_uom !== true;
 		let allowServerRateUpdate =
-			item._manual_rate_set !== true &&
+			!manualOverride &&
 			!priceLocked &&
 			!offerApplied &&
 			!lockReturnPricing;
@@ -873,17 +1090,25 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 			)
 				? Number.parseFloat(item.base_discount_amount)
 				: toBase(item.discount_amount);
+			const rawServerBasePriceList = Number.parseFloat(
+				update.base_price_list_rate ?? update.price_list_rate,
+			);
+			const rawServerBaseDiscount = Number.parseFloat(
+				update.base_discount_amount ?? update.discount_amount,
+			);
 			const epsilon = 1e-6;
 			const zeroRateFromServer = basePriceListRate > 0 && baseRate <= 0;
 			const zeroPriceListFromServer =
-				!Number.isFinite(basePriceListRate) || basePriceListRate <= 0;
+				!Number.isFinite(rawServerBasePriceList) ||
+				rawServerBasePriceList <= 0;
 			const serverRemovedPriceList =
 				zeroPriceListFromServer &&
 					Number.isFinite(originalBasePriceList)
 					? originalBasePriceList > 0
 					: false;
 			const serverRemovedDiscount =
-				(!Number.isFinite(baseDiscount) || baseDiscount <= 0) &&
+				(!Number.isFinite(rawServerBaseDiscount) ||
+					rawServerBaseDiscount <= 0) &&
 					Number.isFinite(originalBaseDiscount)
 					? originalBaseDiscount > 0
 					: false;
@@ -1002,6 +1227,7 @@ export async function _applyServerPricingRules(context: any, ctx: any = {}) {
 	});
 
 	syncAutoFreeLines(context, freebiesMap);
+	refreshInvoiceTotals(context);
 	if (typeof context.$forceUpdate === "function") {
 		context.$forceUpdate();
 	}

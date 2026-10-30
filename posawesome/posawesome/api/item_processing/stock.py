@@ -4,6 +4,7 @@ from frappe.query_builder.functions import Sum
 from frappe.utils import cstr, flt, json
 from erpnext.stock.doctype.batch.batch import get_batch_qty
 
+
 def get_stock_availability(item_code, warehouse):
     """Return total available quantity for an item in the given warehouse.
 

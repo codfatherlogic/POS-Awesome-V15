@@ -7,6 +7,7 @@ from frappe import _, as_json
 import json
 import time
 
+
 @frappe.whitelist()
 def get_items_details(pos_profile, items_data, price_list=None, customer=None):
     """Bulk fetch item details for a list of items."""
@@ -52,7 +53,7 @@ def get_item_detail(item, doc=None, warehouse=None, price_list=None, company=Non
 
     item = normalize_mapping(item)
     doc = normalize_mapping(doc) if doc is not None else doc
-    
+
     today = nowdate()
     item_code = item.get("item_code")
     batch_no_data = []

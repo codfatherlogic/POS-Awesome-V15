@@ -1,5 +1,10 @@
 import { ref, onUnmounted } from "vue";
 import { checkDbHealth } from "../../../../offline/index";
+import {
+	finishStartupPhase,
+	startStartupPhase,
+} from "../../../../utils/startupTrace";
+import { buildPosWorkerUrl } from "../../../utils/workerUrl";
 
 declare const __: (_text: string) => string;
 declare const frappe: any;
@@ -11,29 +16,56 @@ declare const frappe: any;
  * Ensuring storage is available before attempting heavy operations prevents crashes.
  */
 export function useItemStorageSafety() {
+	const STORAGE_RECHECK_COOLDOWN_MS = 5 * 1000;
 	// State
 	const storageAvailable = ref(true);
 	const itemWorker = ref<Worker | null>(null);
+	let lastFailedHealthCheckAt = 0;
 
 	/**
 	 * Checks if the database is healthy and actionable.
 	 * @returns {Promise<boolean>}
 	 */
 	async function ensureStorageHealth() {
-		// If we already know storage is broken, don't keep checking unless we want to implement retry logic.
-		// For now, we assume if it failed once, it's safer to degrade gracefully.
-		if (!storageAvailable.value) return false;
+		if (!storageAvailable.value) {
+			const now = Date.now();
+			if (now - lastFailedHealthCheckAt < STORAGE_RECHECK_COOLDOWN_MS) {
+				return false;
+			}
+		}
 
 		const isHealthy = await checkDbHealth();
+		if (isHealthy) {
+			if (!storageAvailable.value) {
+				markStorageAvailable();
+			}
+			return true;
+		}
+
+		lastFailedHealthCheckAt = Date.now();
 		if (!isHealthy) {
 			console.warn("Storage health check failed");
 			markStorageUnavailable({
 				error: "Storage health check failed",
 				details: "Database could not be accessed or recovered.",
 			});
-			return false;
 		}
-		return true;
+		return false;
+	}
+
+	function markStorageAvailable() {
+		storageAvailable.value = true;
+		lastFailedHealthCheckAt = 0;
+		startItemWorker();
+
+		if (window.frappe) {
+			frappe.show_alert({
+				message: __(
+					"Local item storage recovered. Background sync resumed.",
+				),
+				indicator: "green",
+			});
+		}
 	}
 
 	/**
@@ -45,6 +77,7 @@ export function useItemStorageSafety() {
 
 		console.error("Marking storage as unavailable", args);
 		storageAvailable.value = false;
+		lastFailedHealthCheckAt = Date.now();
 
 		// Terminate worker to prevent it from trying to access broken DB
 		if (itemWorker.value) {
@@ -77,10 +110,12 @@ export function useItemStorageSafety() {
 			return;
 		}
 
+		const phase = startStartupPhase("items.worker_creation");
 		try {
 			// Correct path to the worker file
-			const workerUrl =
-				"/assets/posawesome/dist/js/posapp/workers/itemWorker.js";
+			const workerUrl = buildPosWorkerUrl("itemWorker.js", {
+				includeStartupTrace: true,
+			});
 
 			try {
 				// Try initializing with classic type first (better compatibility)
@@ -106,8 +141,10 @@ export function useItemStorageSafety() {
 			};
 
 			console.log("Item Worker started");
+			finishStartupPhase(phase, "ok");
 		} catch (e: unknown) {
 			console.error("Failed to start item worker", e);
+			finishStartupPhase(phase, "error", { error: e });
 		}
 	}
 
@@ -127,6 +164,7 @@ export function useItemStorageSafety() {
 		// Methods
 		ensureStorageHealth,
 		markStorageUnavailable,
+		markStorageAvailable,
 		startItemWorker,
 	};
 }

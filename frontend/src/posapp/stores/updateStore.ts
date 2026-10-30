@@ -107,6 +107,7 @@ function formatTimestamp(timestamp: number | null): string | null {
 			return formatter.format(date);
 		}
 	} catch {
+		// Fall back to ISO formatting when locale formatting is unavailable.
 	}
 	return date.toISOString();
 }
@@ -123,6 +124,8 @@ export interface UpdateState {
 	availableCommit: string | null;
 	availableCommitDate: string | null;
 	availableBranch: string | null;
+	availableReleaseUrl: string | null;
+	repoUrl: string | null;
 	availableCommits: Array<{
 		commit_hash: string;
 		commit_short?: string;
@@ -146,6 +149,8 @@ export const useUpdateStore = defineStore("update", {
 		availableCommit: null,
 		availableCommitDate: null,
 		availableBranch: null,
+		availableReleaseUrl: null,
+		repoUrl: null,
 		availableCommits: [],
 		reloadAction: null,
 		reloading: false,
@@ -317,13 +322,14 @@ export const useUpdateStore = defineStore("update", {
 			if (timestampChanged) {
 				updates.availableTimestamp = timestamp;
 			}
-				if (versionChanged) {
-					updates.availableMessage = null;
-					updates.availableCommit = null;
-					updates.availableCommitDate = null;
-					updates.availableBranch = null;
-					updates.availableCommits = [];
-				}
+			if (versionChanged) {
+				updates.availableMessage = null;
+				updates.availableCommit = null;
+				updates.availableCommitDate = null;
+				updates.availableBranch = null;
+				updates.availableReleaseUrl = null;
+				updates.availableCommits = [];
+			}
 			if (!currentVersion) {
 				updates.currentVersion = normalized;
 			}
@@ -433,6 +439,14 @@ export const useUpdateStore = defineStore("update", {
 				if (buildVersion) {
 					this.setAvailableVersion(buildVersion);
 				}
+				this.availableReleaseUrl =
+					typeof r?.message?.release_url === "string"
+						? r.message.release_url
+						: null;
+				this.repoUrl =
+					typeof r?.message?.repo_url === "string"
+						? r.message.repo_url
+						: null;
 				if (r?.message?.remote_ahead) {
 					const remoteAhead = r.message
 						.remote_ahead as Record<string, string> | null;

@@ -1,13 +1,46 @@
 import {
 	isOffline,
 	saveCustomerBalance,
-	getCachedCustomerBalance,
 } from "../../../../offline/index";
 import { useDiscounts } from "../../../composables/pos/shared/useDiscounts";
+import { resolvePosDocumentDoctype } from "../../../utils/posDocumentMode";
+import { resolvePricingRuleName } from "./pricing_rule_names";
 
 declare const __: (_text: string, _args?: any[]) => string;
 declare const flt: (_value: unknown, _precision?: number) => number;
 declare const frappe: any;
+
+function markPricingRuleFreeLines(items: any[] = []) {
+	items.forEach((item) => {
+		if (
+			!item ||
+			!(
+				item.is_free_item === 1 ||
+				item.is_free_item === true ||
+				item.is_free_item === "1"
+			)
+		) {
+			return;
+		}
+		if (item.auto_free_source) {
+			return;
+		}
+		const ruleName = resolvePricingRuleName(item);
+		if (!ruleName) {
+			return;
+		}
+		const parentRowId =
+			item.parent_row_id ||
+			item.parent_detail_docname ||
+			item.parent_row ||
+			item.parent_docname ||
+			"";
+		item.source_rule = item.source_rule || ruleName;
+		item.auto_free_source = parentRowId
+			? `${ruleName}::${item.item_code}::${parentRowId}`
+			: `${ruleName}::${item.item_code}`;
+	});
+}
 
 /**
  * Loader Utils
@@ -43,62 +76,62 @@ declare const frappe: any;
  * - context.toastStore
  */
 
+const customerBalanceRequests = new WeakMap<object, number>();
+
 export async function fetch_customer_balance(context: any) {
+	const customer = context.customer;
+	const company = context.pos_profile?.company;
+	const user = frappe.session?.user;
+	const request = (customerBalanceRequests.get(context) || 0) + 1;
+	customerBalanceRequests.set(context, request);
+	const isCurrent = () =>
+		customerBalanceRequests.get(context) === request &&
+		context.customer === customer &&
+		context.pos_profile?.company === company &&
+		frappe.session?.user === user;
+
+	context.customer_balance = null;
+	context.customer_balance_currency = undefined;
+	context.customer_balance_loading = true;
 	try {
-		if (!context.customer) {
-			context.customer_balance = 0;
+		if (!customer) return;
+
+		// A cached balance cannot prove current availability or permission.
+		if (isOffline()) {
+			context.toastStore.show({
+				title: __("Customer balance unavailable offline"),
+				text: __("Balance will be updated when connection is restored"),
+				color: "warning",
+			});
 			return;
 		}
 
-		// Check if offline and use cached balance
-		if (isOffline()) {
-			const cachedBalance = getCachedCustomerBalance(context.customer);
-			if (cachedBalance !== null) {
-				context.customer_balance = cachedBalance;
-				return;
-			} else {
-				// No cached balance available in offline mode
-				context.customer_balance = 0;
-				context.toastStore.show({
-					title: __("Customer balance unavailable offline"),
-					text: __(
-						"Balance will be updated when connection is restored",
-					),
-					color: "warning",
-				});
-				return;
-			}
-		}
-
-		// Online mode: fetch from server and cache the result
 		const r = await frappe.call({
 			method: "posawesome.posawesome.api.customer.get_customer_balance",
-			args: { customer: context.customer },
+			args: {
+				customer,
+				company,
+			},
 		});
 
-		const balance = r?.message?.balance || 0;
+		if (!isCurrent()) return;
+		const value = r?.message?.balance;
+		const balance = typeof value === "number" && Number.isFinite(value) ? value : null;
+		const currency = balance !== null ? r?.message?.currency || undefined : undefined;
 		context.customer_balance = balance;
+		context.customer_balance_currency = currency;
 
-		// Cache the balanced for offline use
-		saveCustomerBalance(context.customer, balance);
+		saveCustomerBalance(customer, balance, currency, company, user);
 	} catch (error) {
+		if (!isCurrent()) return;
 		console.error("Error fetching balance:", error);
-
-		// Try to use cached balance as fallback
-		const cachedBalance = getCachedCustomerBalance(context.customer);
-		if (cachedBalance !== null) {
-			context.customer_balance = cachedBalance;
-			context.toastStore.show({
-				title: __("Using cached customer balance"),
-				text: __("Could not fetch latest balance from server"),
-				color: "warning",
-			});
-		} else {
-			context.toastStore.show({
-				title: __("Error fetching customer balance"),
-				color: "error",
-			});
-			context.customer_balance = 0;
+		context.toastStore.show({
+			title: __("Error fetching customer balance"),
+			color: "error",
+		});
+	} finally {
+		if (customerBalanceRequests.get(context) === request) {
+			context.customer_balance_loading = false;
 		}
 	}
 }
@@ -111,6 +144,7 @@ export async function load_invoice(
 	const {
 		preserveAdditionalDiscountPercentage = false,
 		preserveStickies = false,
+		preserveExchange = false,
 	} = options || {};
 	const usePercentageDiscount = Boolean(
 		context.pos_profile?.posa_use_percentage_discount,
@@ -136,7 +170,7 @@ export async function load_invoice(
 		: null;
 
 	if (context.clear_invoice) {
-		context.clear_invoice({ preserveStickies });
+		context.clear_invoice({ preserveStickies, preserveExchange });
 	}
 
 	// Restore stickies if they aren't provided in the data
@@ -180,7 +214,10 @@ export async function load_invoice(
 		}
 	} else if (
 		data.doctype === "Sales Order" &&
-		context.pos_profile?.posa_create_only_sales_order
+		resolvePosDocumentDoctype({
+			invoiceType: "Order",
+			posProfile: context.pos_profile,
+		}) === "Sales Order"
 	) {
 		context.invoiceType = "Order";
 		if (!context.invoiceTypes.includes("Order")) {
@@ -192,6 +229,7 @@ export async function load_invoice(
 	context.posa_offers = data.posa_offers || [];
 	context.items = data.items || [];
 	context.packed_items = data.packed_items || [];
+	markPricingRuleFreeLines(context.items);
 
 	if (data.is_return && data.return_against) {
 		context.items.forEach((item) => {
@@ -210,12 +248,44 @@ export async function load_invoice(
 					? context.makeid(20)
 					: Math.random().toString(36).substr(2, 9);
 			}
-			if (item.batch_no) {
+			if (
+				item.batch_no &&
+				Array.isArray(item.batch_no_data) &&
+				item.batch_no_data.length > 0
+			) {
 				if (context.set_batch_qty)
 					context.set_batch_qty(item, item.batch_no);
 			}
 			if (!item.original_item_name) {
 				item.original_item_name = item.item_name;
+			}
+
+			// Return rows come back from the backend with a `batch_no` string but
+			// no `batch_no_data`, so the batch column renders blank until the qty
+			// is touched. Seed a single display option (with a positive qty, since
+			// getDisplayableBatchOptions filters out non-positive batches) so the
+			// selected batch shows immediately. Display-only: we deliberately do
+			// NOT call set_batch_qty here — it would refetch item details and could
+			// reset the locked return price.
+			if (
+				data.is_return &&
+				data.return_against &&
+				item.batch_no &&
+				(!Array.isArray(item.batch_no_data) ||
+					item.batch_no_data.length === 0)
+			) {
+				// The cart row's blue "Batch: …" chip is gated on has_batch_no,
+				// which the return payload omits; the item clearly has a batch.
+				if (!item.has_batch_no) item.has_batch_no = 1;
+				const displayQty = Math.abs(flt(item.qty)) || 0;
+				item.batch_no_data = [
+					{
+						batch_no: item.batch_no,
+						batch_qty: displayQty,
+						available_qty: displayQty,
+						expiry_date: item.batch_no_expiry_date || null,
+					},
+				];
 			}
 		});
 
@@ -256,11 +326,19 @@ export async function load_invoice(
 		);
 		context.delivery_charges_rate = data.posa_delivery_charges_rate;
 	}
+	const roundFloat = (value: unknown, fallbackPrecision = 2) => {
+		const precision = Number.isFinite(Number(context.float_precision))
+			? Number(context.float_precision)
+			: fallbackPrecision;
+		return context.flt
+			? context.flt(value, precision)
+			: flt(value, precision);
+	};
 	let docDiscountAmount = flt(data.discount_amount);
 	const docDiscountPercentage =
 		data.additional_discount_percentage !== undefined &&
 		data.additional_discount_percentage !== null
-			? flt(data.additional_discount_percentage)
+			? roundFloat(data.additional_discount_percentage)
 			: 0;
 	const docIsReturn = Boolean(data.is_return);
 	if (docIsReturn && !usePercentageDiscount && docDiscountAmount > 0) {
@@ -343,6 +421,7 @@ export async function load_invoice(
 		} else {
 			resolvedPercentage = Math.abs(resolvedPercentage);
 		}
+		resolvedPercentage = roundFloat(resolvedPercentage);
 
 		context.additional_discount_percentage = resolvedPercentage;
 		updateDiscountAmount(context);

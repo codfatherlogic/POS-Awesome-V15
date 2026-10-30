@@ -3,9 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { change_price_list_rate } from "../src/posapp/components/pos/invoice_utils/dialogs";
 
 declare global {
-	// eslint-disable-next-line no-var
 	var __: (_text: string, _args?: any[]) => string;
-	// eslint-disable-next-line no-var
 	var frappe: any;
 }
 
@@ -23,7 +21,8 @@ describe("change_price_list_rate", () => {
 			selected_currency: "PKR",
 			price_list_currency: "PKR",
 			selected_price_list: "Standard Selling",
-			pos_profile: { currency: "PKR" },
+			pos_profile: { name: "Main POS", currency: "PKR" },
+			customer: "Walk-in Customer",
 			currency_precision: 2,
 			flt: (value: any) => Number(value),
 			_toBaseCurrency: (value: any) => Number(value),
@@ -65,6 +64,8 @@ describe("change_price_list_rate", () => {
 				price_list: "Standard Selling",
 				rate: 150,
 				uom: "Nos",
+				pos_profile: "Main POS",
+				customer: "Walk-in Customer",
 			},
 		});
 	});

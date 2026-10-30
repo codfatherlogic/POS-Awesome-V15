@@ -1,5 +1,5 @@
 <template>
-	<td :colspan="colspan" class="ma-0 pa-0 posa-expanded-row-cell">
+	<component :is="rootTag" v-bind="rootAttrs">
 		<div
 			v-if="isExpanded"
 			class="posa-expanded-content responsive-expanded-content"
@@ -92,8 +92,7 @@
 									calcPrices(item, $event.target.value, $event),
 								]"
 								:disabled="
-									!pos_profile.posa_allow_user_to_edit_rate ||
-									!!item.posa_is_replace
+									!pos_profile.posa_allow_user_to_edit_rate || !!item.posa_is_replace
 								"
 								prepend-inner-icon="mdi-currency-usd"
 							></v-text-field>
@@ -115,7 +114,8 @@
 								:disabled="
 									!pos_profile.posa_allow_user_to_edit_item_discount ||
 									!!item.posa_is_replace ||
-									!!item.posa_offer_applied
+									!!item.posa_offer_applied ||
+									!!item.retailmind_non_discountable
 								"
 								prepend-inner-icon="mdi-percent"
 							></v-text-field>
@@ -137,7 +137,8 @@
 								:disabled="
 									!pos_profile.posa_allow_user_to_edit_item_discount ||
 									!!item.posa_is_replace ||
-									!!item.posa_offer_applied
+									!!item.posa_offer_applied ||
+									!!item.retailmind_non_discountable
 								"
 								prepend-inner-icon="mdi-tag-minus"
 							></v-text-field>
@@ -354,7 +355,7 @@
 						<div class="posa-form-field">
 							<v-autocomplete
 								v-model="item.batch_no"
-								:items="item.batch_no_data"
+								:items="getBatchOptions(item)"
 								item-title="batch_no"
 								variant="outlined"
 								density="compact"
@@ -367,15 +368,13 @@
 							>
 								<template v-slot:item="{ props, item }">
 									<v-list-item v-bind="props">
-										<v-list-item-title v-html="getRaw(item).batch_no"></v-list-item-title>
+										<v-list-item-title>{{ getRaw(item).batch_no }}</v-list-item-title>
 										<v-list-item-subtitle class="d-flex align-center">
-											<span
-												v-html="
-													`Available QTY  '${
-														getRaw(item).available_qty ?? getRaw(item).batch_qty
-													}' - Expiry Date ${getRaw(item).expiry_date}`
-												"
-											></span>
+											<span>{{
+												`Available QTY ${
+													getRaw(item).available_qty ?? getRaw(item).batch_qty
+												} - Expiry Date ${getRaw(item).expiry_date}`
+											}}</span>
 											<v-chip
 												v-if="getRaw(item).is_expired"
 												color="error"
@@ -427,16 +426,19 @@
 				<div class="text-caption mt-2">{{ __("Loading details...") }}</div>
 			</div>
 		</div>
-	</td>
+	</component>
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
+import { getDisplayableBatchOptions } from "../../../composables/pos/shared/useBatchSerial";
 import type { CartItem, POSProfile, InvoiceDoc } from "../../../types/models";
 
 interface Props {
 	item: CartItem | any;
 	isExpanded: boolean;
 	colspan: number;
+	panelOnly?: boolean;
 	pos_profile: POSProfile | any;
 	invoiceType?: string;
 	isReturnInvoice?: boolean;
@@ -461,7 +463,9 @@ interface Props {
 	validateDueDate: (_item: any) => void;
 }
 
-defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+	panelOnly: false,
+});
 
 const emit = defineEmits<{
 	"qty-change": [item: CartItem, event: any];
@@ -474,7 +478,19 @@ const onQtyChange = (item: CartItem, event: any) => {
 	emit("qty-change", item, event);
 };
 
+const rootTag = computed(() => (props.panelOnly ? "div" : "td"));
+const rootAttrs = computed(() => {
+	const className = props.panelOnly
+		? "ma-0 pa-0 posa-expanded-row-cell posa-expanded-row-cell--panel"
+		: "ma-0 pa-0 posa-expanded-row-cell";
+	if (props.panelOnly) {
+		return { class: className };
+	}
+	return { colspan: props.colspan, class: className };
+});
+
 const getRaw = (item: any) => item?.raw || {};
+const getBatchOptions = (item: any) => getDisplayableBatchOptions(item?.batch_no_data);
 </script>
 
 <style scoped>

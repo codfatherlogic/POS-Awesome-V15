@@ -14,7 +14,9 @@
 					</v-col>
 					<v-col
 						cols="12"
-						v-if="posProfile.posa_allow_write_off_change && diffPayment > 0 && !invoiceDoc.is_return"
+						v-if="
+							posProfile.posa_allow_write_off_change && diffPayment > 0 && !invoiceDoc.is_return
+						"
 					>
 						<v-switch
 							:model-value="isWriteOffChange"
@@ -40,7 +42,7 @@
 							:model-value="isCreditReturn"
 							color="primary"
 							flat
-							:label="$frappe._('Credit Return?')"
+							:label="$frappe._('Store as Credit?')"
 							class="my-0 pa-1"
 							@update:model-value="$emit('update:isCreditReturn', $event)"
 						></v-switch>
@@ -50,7 +52,7 @@
 							:model-value="redeemCustomerCredit"
 							color="primary"
 							flat
-							:label="$frappe._('Use Customer Credit')"
+							:label="$frappe._('Use Customer Balance')"
 							class="my-0 pa-1"
 							@update:model-value="handleRedeemCustomerCreditUpdate"
 						></v-switch>
@@ -67,7 +69,7 @@
 						:min-date="new Date()"
 						auto-apply
 						teleport
-						placeholder="Due Date"
+						:placeholder="__('Due Date')"
 						class="sleek-field pos-themed-input"
 						@update:model-value="$emit('update:newCreditDueDate', $event)"
 					/>
@@ -118,13 +120,20 @@
 				</div>
 
 				<div v-else-if="redeemCustomerCredit" class="payment-options-panel__note">
-					<h4>{{ $frappe._("Customer Credit Enabled") }}</h4>
-					<p>{{ $frappe._("Credit redemption details are shown below in this section.") }}</p>
+					<h4>{{ $frappe._("Available Customer Redeemable Balance") }}</h4>
+					<p>
+						{{ $frappe._("Available customer redeemable balance") }}:
+						{{ formatCurrency(availableCustomerCredit) }}
+					</p>
+					<p>{{ $frappe._("Applied now") }}: {{ formatCurrency(redeemedCustomerCredit) }}</p>
+					<p>{{ customerCreditSources }} {{ $frappe._("source(s) will be used in order.") }}</p>
 				</div>
 
 				<div v-else-if="invoiceDoc.is_return && isCreditReturn" class="payment-options-panel__note">
-					<h4>{{ $frappe._("Credit Return Active") }}</h4>
-					<p>{{ $frappe._("This return will be settled as customer credit instead of cashback.") }}</p>
+					<h4>{{ $frappe._("Customer Credit Return Active") }}</h4>
+					<p>
+						{{ $frappe._("This return will be saved as customer credit instead of cashback.") }}
+					</p>
 				</div>
 
 				<div v-else-if="invoiceDoc.is_return && isCashback" class="payment-options-panel__note">
@@ -200,6 +209,22 @@ const props = defineProps({
 		type: Boolean,
 		default: false,
 	},
+	availableCustomerCredit: {
+		type: Number,
+		default: 0,
+	},
+	redeemedCustomerCredit: {
+		type: Number,
+		default: 0,
+	},
+	customerCreditSources: {
+		type: Number,
+		default: 0,
+	},
+	formatCurrency: {
+		type: Function,
+		default: (value) => value,
+	},
 });
 
 const emit = defineEmits([
@@ -216,16 +241,6 @@ const emit = defineEmits([
 ]);
 
 const $frappe = inject("frappe", window.frappe);
-
-const hasPanelContent = computed(() => {
-	return (
-		props.isCreditSale ||
-		props.redeemCustomerCredit ||
-		props.isWriteOffChange ||
-		(props.invoiceDoc?.is_return && props.isCreditReturn) ||
-		(props.invoiceDoc?.is_return && props.isCashback)
-	);
-});
 
 const handleRedeemCustomerCreditUpdate = (val) => {
 	emit("update:redeemCustomerCredit", val);

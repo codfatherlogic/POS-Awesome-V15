@@ -1,6 +1,7 @@
 import _ from "lodash";
 import { shouldReloadOnSearchClear } from "../../../utils/searchUtils.js";
 import { isOffline } from "../../../../offline/index";
+import { resolveBooleanSetting } from "./selectorSearch/resolveBooleanSetting";
 
 declare const flt: (_value: unknown) => number;
 
@@ -13,6 +14,7 @@ type SearchDeps = {
 	isLimitSearchEnabled?: () => boolean;
 	runLimitSearch?: (_term: string) => Promise<unknown> | unknown;
 	clearHighlightedItem?: () => void;
+	resolveItemByBarcode?: (_code: string) => any;
 };
 
 export const useItemsSelectorSearch = ({
@@ -24,19 +26,9 @@ export const useItemsSelectorSearch = ({
 	isLimitSearchEnabled,
 	runLimitSearch,
 	clearHighlightedItem,
+	resolveItemByBarcode,
 }: SearchDeps) => {
 	const getVm = (): any => (typeof getVM === "function" ? getVM() : null);
-
-	const resolveBooleanSetting = (value: unknown): boolean => {
-		if (typeof value === "string") {
-			const normalized = value.trim().toLowerCase();
-			return normalized === "1" || normalized === "true" || normalized === "yes";
-		}
-		if (typeof value === "number") {
-			return value === 1;
-		}
-		return Boolean(value);
-	};
 
 	const usesLimitSearch = (vm: any): boolean => {
 		if (typeof isLimitSearchEnabled === "function") {
@@ -46,11 +38,15 @@ export const useItemsSelectorSearch = ({
 		if (typeof vm.usesLimitSearch === "boolean") {
 			return vm.usesLimitSearch;
 		}
-		if (vm.usesLimitSearch && typeof vm.usesLimitSearch.value === "boolean") {
+		if (
+			vm.usesLimitSearch &&
+			typeof vm.usesLimitSearch.value === "boolean"
+		) {
 			return vm.usesLimitSearch.value;
 		}
 		return resolveBooleanSetting(
-			vm.pos_profile?.posa_use_limit_search ?? vm.pos_profile?.pose_use_limit_search,
+			vm.pos_profile?.posa_use_limit_search ??
+				vm.pos_profile?.pose_use_limit_search,
 		);
 	};
 
@@ -59,7 +55,10 @@ export const useItemsSelectorSearch = ({
 		if (typeof vm.storageAvailable === "boolean") {
 			return vm.storageAvailable;
 		}
-		if (vm.storageAvailable && typeof vm.storageAvailable.value === "boolean") {
+		if (
+			vm.storageAvailable &&
+			typeof vm.storageAvailable.value === "boolean"
+		) {
 			return vm.storageAvailable.value;
 		}
 		return false;
@@ -130,7 +129,10 @@ export const useItemsSelectorSearch = ({
 			clearHighlightedItem();
 			return;
 		}
-		if (typeof (itemSelection || vm?.itemSelection)?.clearHighlightedItem === "function") {
+		if (
+			typeof (itemSelection || vm?.itemSelection)
+				?.clearHighlightedItem === "function"
+		) {
 			(itemSelection || vm.itemSelection).clearHighlightedItem();
 		}
 	};
@@ -203,7 +205,10 @@ export const useItemsSelectorSearch = ({
 
 		const searchTerm = scannedCode || vm.first_search;
 		await scannerInput.ensureScaleBarcodeSettings();
-		if (!vm.displayedItems.length || !searchTerm) {
+		const displayedItems = Array.isArray(vm.displayedItems)
+			? vm.displayedItems
+			: [];
+		if (!displayedItems.length || !searchTerm) {
 			return;
 		}
 
@@ -213,7 +218,7 @@ export const useItemsSelectorSearch = ({
 		vm.search = search;
 
 		const qty = Number(get_item_qty(searchTerm));
-		const new_item = { ...vm.displayedItems[0] };
+		const new_item = { ...displayedItems[0] };
 		new_item.qty = flt(qty);
 		if (isScaleBarcode) {
 			new_item._barcode_qty = true;
@@ -223,7 +228,7 @@ export const useItemsSelectorSearch = ({
 		if (Array.isArray(new_item.item_barcode)) {
 			new_item.item_barcode.forEach((element) => {
 				if (search === element.barcode) {
-					new_item.uom = element.posa_uom;
+					new_item.uom = element.uom;
 					match = true;
 				}
 			});
@@ -300,12 +305,28 @@ export const useItemsSelectorSearch = ({
 		vm.first_search = trimmedQuery;
 		syncSearchInput(vm, trimmedQuery);
 
+		// The barcode index owns its memory threshold and large-catalog fallback.
+		if (typeof resolveItemByBarcode === "function") {
+			if (resolveItemByBarcode(trimmedQuery)) {
+				// Guard: auto-add watcher already triggered scan pipeline for this code
+				if (scannerInput?.pendingScanCode?.value === trimmedQuery) {
+					return;
+				}
+				if (typeof vm.onBarcodeScanned === "function") {
+					vm.onBarcodeScanned(trimmedQuery);
+				} else if (scannerInput?.onBarcodeScanned) {
+					scannerInput?.onBarcodeScanned(trimmedQuery);
+				}
+				return;
+			}
+		}
+
 		// If the input is a numeric string 12 characters or longer, treat it as a barcode
 		if (/^\d{12,}$/.test(trimmedQuery)) {
 			if (typeof vm.onBarcodeScanned === "function") {
 				vm.onBarcodeScanned(trimmedQuery);
-			} else if (scannerInput.onBarcodeScanned) {
-				scannerInput.onBarcodeScanned(trimmedQuery);
+			} else if (scannerInput?.onBarcodeScanned) {
+				scannerInput?.onBarcodeScanned(trimmedQuery);
 			}
 			return;
 		}
@@ -335,7 +356,8 @@ export const useItemsSelectorSearch = ({
 					await searchItems(trimmedQuery);
 				} else {
 					const getItems = getItemsLoader(vm);
-					const shouldForceServer = !hasStorageAvailable(vm) || !isOffline();
+					const shouldForceServer =
+						!hasStorageAvailable(vm) || !isOffline();
 					if (getItems) {
 						await getItems(shouldForceServer);
 					}
@@ -388,6 +410,16 @@ export const useItemsSelectorSearch = ({
 		const vm = getVm();
 		if (!vm) return;
 
+		if (getHighlightedIndex(itemSelection || vm.itemSelection) >= 0) {
+			if (event && typeof event.preventDefault === "function") {
+				event.preventDefault();
+			}
+			(itemSelection || vm.itemSelection).selectHighlightedItem({
+				postAddFocus: event?.shiftKey ? "qty" : "default",
+			});
+			return;
+		}
+
 		if (usesLimitSearch(vm)) {
 			if (event && typeof event.preventDefault === "function") {
 				event.preventDefault();
@@ -400,13 +432,6 @@ export const useItemsSelectorSearch = ({
 			return;
 		}
 
-		if (getHighlightedIndex(itemSelection || vm.itemSelection) >= 0) {
-			if (event && typeof event.preventDefault === "function") {
-				event.preventDefault();
-			}
-			(itemSelection || vm.itemSelection).selectHighlightedItem();
-			return;
-		}
 		if (search_onchange.cancel) {
 			search_onchange.cancel();
 		}

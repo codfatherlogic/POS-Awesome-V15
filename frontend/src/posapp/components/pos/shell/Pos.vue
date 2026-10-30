@@ -1,7 +1,7 @@
 <template>
 	<div
 		class="pos-main-container dynamic-container"
-		:class="rtlClasses"
+		:class="[rtlClasses, { 'pos-main-container--counter-grid': counterGridActive }]"
 		:style="[responsiveStyles, layoutStyleOverrides, rtlStyles]"
 	>
 		<Drafts></Drafts>
@@ -28,9 +28,71 @@
 			@update:model-value="handlePaymentDialogUpdate"
 			@after-leave="handlePaymentDialogAfterLeave"
 		>
-			<Payments dialog-mode />
+			<Payments dialog-mode :counter-grid-mode="counterGridActive" />
+		</v-dialog>
+		<v-dialog
+			v-if="counterGridActive"
+			v-model="counterItemSearchOpen"
+			eager
+			:retain-focus="true"
+			width="calc(100vw - 32px)"
+			max-width="1500"
+			class="counter-item-search-dialog"
+			@after-enter="handleCounterItemSearchAfterEnter"
+			@after-leave="handleCounterItemSearchAfterLeave"
+		>
+			<section class="counter-item-search-surface" aria-label="Item search">
+				<header class="counter-item-search-header">
+					<div class="counter-item-search-header__copy">
+						<strong>{{ counterItemSearchTitle }}</strong>
+						<span>{{ counterItemSearchSubtitle }}</span>
+					</div>
+					<v-select
+						v-if="counterAlternateSources.length > 1"
+						:model-value="counterAlternateSourceRowId"
+						:items="counterAlternateSources"
+						item-title="label"
+						item-value="row_id"
+						:label="__('Unavailable cart item')"
+						density="compact"
+						variant="outlined"
+						hide-details
+						class="counter-item-search-header__source"
+						@update:model-value="counterAlternateSourceRowId = $event"
+					/>
+					<v-btn
+						icon="mdi-close"
+						variant="text"
+						:aria-label="__('Close item search')"
+						@click="closeCounterItemSearch"
+					/>
+				</header>
+				<ItemsSelector
+					ref="counterItemsSelector"
+					context="pos"
+					presentation="counter-grid-dialog"
+					:initial-search="counterItemSearchQuery"
+					:alternate-request="counterAlternateRequest"
+					@item-added="handleCounterItemAdded"
+					@alternates-cancelled="handleCounterAlternatesCancelled"
+				/>
+			</section>
+		</v-dialog>
+		<v-dialog
+			v-if="counterGridActive"
+			:model-value="counterAuxiliaryOpen"
+			width="calc(100vw - 32px)"
+			max-width="1380"
+			@update:model-value="handleCounterAuxiliaryUpdate"
+			@after-leave="handleCounterAuxiliaryAfterLeave"
+		>
+			<section class="counter-auxiliary-surface" :data-testid="`counter-grid-${activeView}`">
+				<PosOffers v-if="activeView === 'offers'" />
+				<PosCoupons v-else-if="activeView === 'coupons'" />
+			</section>
 		</v-dialog>
 		<v-row
+			v-if="!counterGridActive"
 			v-show="!dialog"
 			dense
 			class="ma-0 dynamic-main-row"
@@ -70,7 +132,11 @@
 				<PosCoupons></PosCoupons>
 			</v-col>
 			<v-col
-				v-if="(!useCompactPosSwitcher || compactPanel === 'selector') && activeView === 'payment' && !usePaymentDialog"
+				v-if="
+					(!useCompactPosSwitcher || compactPanel === 'selector') &&
+					activeView === 'payment' &&
+					!usePaymentDialog
+				"
 				:xl="useCompactPosSwitcher ? 12 : 5"
 				:lg="useCompactPosSwitcher ? 12 : 5"
 				:md="useCompactPosSwitcher ? 12 : 5"
@@ -93,6 +159,13 @@
 				<Invoice ref="invoicePanel"></Invoice>
 			</v-col>
 		</v-row>
+		<section v-else v-show="!dialog" class="counter-grid-pos" data-testid="counter-grid-pos">
+			<Invoice ref="invoicePanel" presentation="counter-grid" />
+			<CounterGridHealthStrip
+				:warehouse="posProfile?.warehouse"
+				:price-list="posProfile?.selling_price_list"
+			/>
+		</section>
 		<div v-if="showBottomDock" ref="mobileDock" class="mobile-pos-stack">
 			<div class="mobile-sale-dock">
 				<div class="mobile-sale-dock__copy">
@@ -108,6 +181,12 @@
 						v-if="!posProfile?.posa_use_percentage_discount"
 						ref="additionalDiscountField"
 						v-model="additionalDiscountDisplay"
+						name="pos-mobile-additional-discount"
+						autocomplete="transaction-amount"
+						inputmode="decimal"
+						data-1p-ignore="true"
+						data-lpignore="true"
+						data-bwignore="true"
 						@update:model-value="handleAdditionalDiscountUpdate"
 						@focus="handleAdditionalDiscountFocus"
 						@blur="handleAdditionalDiscountBlur"
@@ -127,6 +206,12 @@
 						v-else
 						ref="additionalDiscountField"
 						v-model="additionalDiscountPercentageDisplay"
+						name="pos-mobile-additional-discount-percent"
+						autocomplete="transaction-amount"
+						inputmode="decimal"
+						data-1p-ignore="true"
+						data-lpignore="true"
+						data-bwignore="true"
 						@update:model-value="handleAdditionalDiscountPercentageUpdate"
 						@focus="handleAdditionalDiscountPercentageFocus"
 						@blur="handleAdditionalDiscountPercentageBlur"
@@ -200,6 +285,7 @@
 <script>
 import ItemsSelector from "../items/ItemsSelector.vue";
 import Invoice from "../Invoice.vue";
+import CounterGridHealthStrip from "./CounterGridHealthStrip.vue";
 import OpeningDialog from "../shift/OpeningDialog.vue";
 import Payments from "../Payments.vue";
 import PosOffers from "../offers/PosOffers.vue";
@@ -218,12 +304,15 @@ import { useOffers } from "../../../composables/pos/shared/useOffers";
 import { clearExpiredCustomerBalances } from "../../../../offline/index";
 import { useResponsive } from "../../../composables/core/useResponsive";
 import { useRtl } from "../../../composables/core/useRtl";
-import { useCustomersStore } from "../../../stores/customersStore.js";
 import { useUIStore } from "../../../stores/uiStore.js";
 import { useInvoiceStore } from "../../../stores/invoiceStore.js";
-import { useItemsStore } from "../../../stores/itemsStore.js";
+import { useToastStore } from "../../../stores/toastStore";
 import { storeToRefs } from "pinia";
 import { useCustomerDisplayPublisher } from "../../../composables/pos/shared/useCustomerDisplayPublisher";
+import { isCounterGridTemplate } from "../../../utils/posUiTemplate";
+import { collectUnavailableCartItems } from "../../../utils/alternateCart";
+import { shouldRedirectPosTabToItemSearch } from "../../../utils/keyboardNavigation";
+import { shouldFocusCartQtyAfterItemAdd } from "../../../utils/cartFocusSettings";
 
 export default {
 	setup() {
@@ -240,24 +329,55 @@ export default {
 		const offers = useOffers();
 		const uiStore = useUIStore();
 		const invoiceStore = useInvoiceStore();
-		const itemsStore = useItemsStore();
+		const toastStore = useToastStore();
 		const __ = window.__;
-		const { activeView, posProfile, paymentDialogOpen } = storeToRefs(uiStore);
+		const { activeView, posProfile, paymentDialogOpen, stockSettings } = storeToRefs(uiStore);
 		const {
 			invoiceDoc,
+			items: invoiceItems,
 			itemsCount,
 			totalQty,
 			grossTotal,
 			discountTotal,
 			additionalDiscount,
 			additionalDiscountPercentage,
+			invoiceType,
 		} = storeToRefs(invoiceStore);
 		const usePaymentDialog = computed(() => responsive.windowWidth.value >= 992);
+		const counterGridActive = computed(() =>
+			isCounterGridTemplate(posProfile.value, responsive.windowWidth.value),
+		);
 		const useCompactPosSwitcher = computed(() => responsive.windowWidth.value < 1100);
 		const compactPanel = ref("selector");
 		const isPhone = computed(() => responsive.isPhone.value);
 		const showBottomDock = computed(
-			() => !dialog.value && responsive.windowWidth.value < 1100,
+			() => !counterGridActive.value && !dialog.value && responsive.windowWidth.value < 1100,
+		);
+		const counterItemSearchOpen = ref(false);
+		const counterDirectEntryPending = ref(false);
+		const counterItemSearchQuery = ref("");
+		const counterItemsSelector = ref(null);
+		const pendingCounterAddedLine = ref(null);
+		const counterAlternateSources = ref([]);
+		const counterAlternateSourceRowId = ref("");
+		const counterAlternateRequest = computed(() => {
+			if (!counterAlternateSourceRowId.value) return null;
+			return (
+				counterAlternateSources.value.find(
+					(source) => source.row_id === counterAlternateSourceRowId.value,
+				) || null
+			);
+		});
+		const counterItemSearchTitle = computed(() =>
+			counterAlternateRequest.value ? __("Choose an alternate item") : __("Find an item"),
+		);
+		const counterItemSearchSubtitle = computed(() => {
+			const source = counterAlternateRequest.value;
+			if (!source) return __("Search name, code, barcode, generic, company, pack or rack");
+			return `${source.item_name || source.item_code} | ${__("Requested quantity")} ${source.qty}`;
+		});
+		const counterAuxiliaryOpen = computed(
+			() => counterGridActive.value && ["offers", "coupons"].includes(activeView.value),
 		);
 		const bottomDockHeight = ref(0);
 		let mobileDockObserver = null;
@@ -275,16 +395,13 @@ export default {
 			const numericValue = Number(rawValue);
 			return Number.isFinite(numericValue) ? numericValue : fallbackTotal;
 		});
-		const activeCurrency = computed(
-			() => invoiceDoc.value?.currency || posProfile.value?.currency || "",
-		);
+		const activeCurrency = computed(() => invoiceDoc.value?.currency || posProfile.value?.currency || "");
 		const formatCompactNumber = (value) =>
 			new Intl.NumberFormat(undefined, {
 				maximumFractionDigits: value % 1 === 0 ? 0 : 2,
 			}).format(Number(value || 0));
 		const getCurrencySymbol = (currency) => {
-			const resolver =
-				window.get_currency_symbol || globalThis.get_currency_symbol;
+			const resolver = window.get_currency_symbol || globalThis.get_currency_symbol;
 			if (typeof resolver === "function") {
 				return resolver(currency || activeCurrency.value || "") || "";
 			}
@@ -307,29 +424,68 @@ export default {
 		const discountPercentageOfferName = computed(
 			() => invoicePanel.value?.discount_percentage_offer_name || null,
 		);
+		const showUnsignedReturnDiscount = computed(
+			() =>
+				!!invoicePanel.value?.return_discount_meta && !posProfile.value?.posa_use_percentage_discount,
+		);
 		const normalizeDiscountDisplay = (value) => {
 			if (value === 0 || value === "0") {
 				return "";
 			}
 			return value;
 		};
-		const additionalDiscountDisplay = ref(
-			normalizeDiscountDisplay(additionalDiscount.value),
-		);
+		const normalizeAdditionalDiscountDisplay = (value) => {
+			if (value === 0 || value === "0") {
+				return "";
+			}
+			if (showUnsignedReturnDiscount.value) {
+				const proratedValue = Number(invoicePanel.value?.return_discount_meta?.prorated_discount);
+				if (Number.isFinite(proratedValue)) {
+					return Math.abs(proratedValue);
+				}
+				const numericValue = Number(value);
+				if (Number.isFinite(numericValue)) {
+					return Math.abs(numericValue);
+				}
+			}
+			return value;
+		};
+		const normalizeAdditionalDiscountInput = (value) => {
+			if (showUnsignedReturnDiscount.value) {
+				const numericValue = Number(value);
+				if (Number.isFinite(numericValue)) {
+					const originalStoredValue = Number(additionalDiscount.value);
+					const sign = Math.sign(
+						Number.isFinite(originalStoredValue) && originalStoredValue !== 0
+							? originalStoredValue
+							: -1,
+					);
+					return sign * Math.abs(numericValue);
+				}
+			}
+			return value;
+		};
+		const additionalDiscountDisplay = ref(normalizeAdditionalDiscountDisplay(additionalDiscount.value));
 		const additionalDiscountPercentageDisplay = ref(
 			normalizeDiscountDisplay(additionalDiscountPercentage.value),
 		);
 
-		watch(additionalDiscount, (value) => {
-			if (!isEditingAdditionalDiscount.value) {
-				additionalDiscountDisplay.value = normalizeDiscountDisplay(value);
-			}
-		});
+		watch(
+			() => [
+				additionalDiscount.value,
+				invoicePanel.value?.return_discount_meta?.prorated_discount,
+				posProfile.value?.posa_use_percentage_discount,
+			],
+			([value]) => {
+				if (!isEditingAdditionalDiscount.value) {
+					additionalDiscountDisplay.value = normalizeAdditionalDiscountDisplay(value);
+				}
+			},
+		);
 
 		watch(additionalDiscountPercentage, (value) => {
 			if (!isEditingAdditionalDiscountPercentage.value) {
-				additionalDiscountPercentageDisplay.value =
-					normalizeDiscountDisplay(value);
+				additionalDiscountPercentageDisplay.value = normalizeDiscountDisplay(value);
 			}
 		});
 
@@ -349,6 +505,10 @@ export default {
 
 		const handlePaymentDialogAfterLeave = () => {
 			if (!usePaymentDialog.value) {
+				return;
+			}
+			if (counterGridActive.value) {
+				nextTick(() => invoicePanel.value?.focusCounterGridEntry?.());
 				return;
 			}
 			focusItemSearchField();
@@ -393,8 +553,110 @@ export default {
 			}
 			showPaymentPanel();
 		};
-		const isSelectorViewActive = (view) =>
-			compactPanel.value === "selector" && activeView.value === view;
+		const resetCounterAlternateState = () => {
+			counterAlternateSources.value = [];
+			counterAlternateSourceRowId.value = "";
+		};
+		const closeCounterItemSearch = () => {
+			counterItemSearchOpen.value = false;
+		};
+		const openCounterItemSearch = async (payload = {}) => {
+			if (!counterGridActive.value) return;
+			const query = typeof payload === "string" ? payload : payload?.query;
+			const normalizedQuery = String(query || "").trim();
+			if (!normalizedQuery || counterDirectEntryPending.value) return;
+
+			counterDirectEntryPending.value = true;
+			try {
+				const directResult =
+					await counterItemsSelector.value?.tryDirectCounterGridEntry?.(normalizedQuery);
+				if (directResult?.handled) {
+					if (directResult.addedLine) {
+						invoicePanel.value?.clearCounterGridEntry?.();
+						if (!shouldFocusCartQtyAfterItemAdd(posProfile.value)) {
+							nextTick(() => invoicePanel.value?.focusCounterGridEntry?.());
+						}
+					} else {
+						nextTick(() => invoicePanel.value?.focusCounterGridEntry?.());
+					}
+					return;
+				}
+			} finally {
+				counterDirectEntryPending.value = false;
+			}
+
+			pendingCounterAddedLine.value = null;
+			resetCounterAlternateState();
+			counterItemSearchQuery.value = normalizedQuery;
+			counterItemSearchOpen.value = true;
+		};
+		const openCartAlternates = () => {
+			if (!counterGridActive.value) return;
+			const sources = collectUnavailableCartItems(invoiceItems.value, {
+				isReturn: Boolean(invoiceDoc.value?.is_return),
+				translate: __,
+				posProfile: posProfile.value,
+				stockSettings: stockSettings.value,
+				blockSaleBeyondAvailableQty: posProfile.value?.posa_block_sale_beyond_available_qty,
+				deferStockValidationToPayment:
+					invoiceType.value === "Order" || invoiceType.value === "Quotation",
+			});
+			if (!sources.length) {
+				toastStore.show({
+					title: invoiceItems.value?.length
+						? __("All cart items have enough stock")
+						: __("The cart is empty"),
+					color: "info",
+				});
+				return;
+			}
+			pendingCounterAddedLine.value = null;
+			counterItemSearchQuery.value = "";
+			counterAlternateSources.value = sources;
+			counterAlternateSourceRowId.value = sources[0].row_id;
+			counterItemSearchOpen.value = true;
+		};
+		const handleCounterItemAdded = (line, alternateSelection = null) => {
+			if (alternateSelection?.origin === "cart" && alternateSelection?.rowId) {
+				invoiceStore.removeItemByRowId(alternateSelection.rowId);
+				eventBus?.emit?.("apply_pricing_rules");
+			}
+			pendingCounterAddedLine.value = line || null;
+			invoicePanel.value?.clearCounterGridEntry?.();
+			counterItemSearchOpen.value = false;
+		};
+		const handleCounterAlternatesCancelled = () => {
+			pendingCounterAddedLine.value = null;
+			counterItemSearchOpen.value = false;
+		};
+		const handleCounterItemSearchAfterEnter = () => {
+			nextTick(() => counterItemsSelector.value?.focusSearchInput?.());
+		};
+		const handleCounterItemSearchAfterLeave = () => {
+			// A fast cashier can start the next lookup while the previous dialog is
+			// still leaving. Do not let that stale transition erase the new query.
+			if (counterItemSearchOpen.value) return;
+			const line = pendingCounterAddedLine.value;
+			pendingCounterAddedLine.value = null;
+			counterItemSearchQuery.value = "";
+			resetCounterAlternateState();
+			if (line && shouldFocusCartQtyAfterItemAdd(posProfile.value)) {
+				eventBus?.emit("focus_cart_item_qty", {
+					item: line,
+					rowId: line?.posa_row_id,
+					itemCode: line?.item_code,
+				});
+				return;
+			}
+			invoicePanel.value?.focusCounterGridEntry?.();
+		};
+		const handleCounterAuxiliaryUpdate = (open) => {
+			if (!open) uiStore.setActiveView("items");
+		};
+		const handleCounterAuxiliaryAfterLeave = () => {
+			nextTick(() => invoicePanel.value?.focusCounterGridEntry?.());
+		};
+		const isSelectorViewActive = (view) => compactPanel.value === "selector" && activeView.value === view;
 		const getFallbackBottomSpace = () => {
 			const rawValue = responsive.responsiveStyles.value["--bottom-safe-space"];
 			const parsed = Number.parseFloat(String(rawValue || "0"));
@@ -418,7 +680,7 @@ export default {
 			};
 		});
 		const handleAdditionalDiscountUpdate = (value) => {
-			invoiceStore.setAdditionalDiscount(value);
+			invoiceStore.setAdditionalDiscount(normalizeAdditionalDiscountInput(value));
 		};
 		const handleAdditionalDiscountFocus = () => {
 			isEditingAdditionalDiscount.value = true;
@@ -444,6 +706,18 @@ export default {
 			field?.focus?.();
 			field?.$el?.querySelector?.("input")?.focus?.();
 		};
+		const handlePosTabFocus = (event) => {
+			if (
+				!shouldRedirectPosTabToItemSearch(event, {
+					counterGridActive: counterGridActive.value,
+				})
+			) {
+				return;
+			}
+
+			event.preventDefault();
+			focusItemSearchField();
+		};
 
 		useCustomerDisplayPublisher({
 			posProfile,
@@ -451,6 +725,7 @@ export default {
 		});
 
 		onMounted(() => {
+			document.addEventListener("keydown", handlePosTabFocus, true);
 			if (typeof window !== "undefined" && "ResizeObserver" in window) {
 				mobileDockObserver = new ResizeObserver(() => {
 					updateBottomDockHeight();
@@ -462,16 +737,22 @@ export default {
 				});
 				eventBus.on("focus_additional_discount", focusAdditionalDiscountField);
 				eventBus.on("set_compact_panel", setCompactPanel);
+				eventBus.on("open_counter_item_search", openCounterItemSearch);
+				eventBus.on("open_cart_alternates", openCartAlternates);
 			}
 			nextTick(() => {
 				updateBottomDockHeight();
 				if (mobileDockObserver && mobileDock.value) {
 					mobileDockObserver.observe(mobileDock.value);
 				}
+				if (counterGridActive.value) {
+					invoicePanel.value?.focusCounterGridEntry?.();
+				}
 			});
 		});
 
 		onBeforeUnmount(() => {
+			document.removeEventListener("keydown", handlePosTabFocus, true);
 			if (mobileDockObserver) {
 				mobileDockObserver.disconnect();
 				mobileDockObserver = null;
@@ -480,6 +761,8 @@ export default {
 				eventBus.off("submit_closing_pos");
 				eventBus.off("focus_additional_discount", focusAdditionalDiscountField);
 				eventBus.off("set_compact_panel", setCompactPanel);
+				eventBus.off("open_counter_item_search", openCounterItemSearch);
+				eventBus.off("open_cart_alternates", openCartAlternates);
 			}
 		});
 
@@ -493,6 +776,12 @@ export default {
 			if (!enabled && paymentDialogOpen.value) {
 				uiStore.closePaymentDialog();
 				uiStore.setActiveView("payment");
+			}
+		});
+
+		watch(counterGridActive, (enabled, wasEnabled) => {
+			if (enabled && !wasEnabled) {
+				nextTick(() => invoicePanel.value?.focusCounterGridEntry?.());
 			}
 		});
 
@@ -514,6 +803,15 @@ export default {
 
 			if (["offers", "coupons", "payment"].includes(activeView.value)) {
 				compactPanel.value = "selector";
+			}
+		});
+
+		watch(counterGridActive, (enabled) => {
+			if (!enabled) {
+				counterItemSearchOpen.value = false;
+				counterItemSearchQuery.value = "";
+				pendingCounterAddedLine.value = null;
+				resetCounterAlternateState();
 			}
 		});
 
@@ -540,7 +838,6 @@ export default {
 			...offers,
 			uiStore,
 			invoiceStore,
-			itemsStore,
 			__,
 			invoiceDoc,
 			itemsCount,
@@ -556,6 +853,15 @@ export default {
 			paymentDialogOpen,
 			isPhone,
 			usePaymentDialog,
+			counterGridActive,
+			counterItemSearchOpen,
+			counterItemSearchQuery,
+			counterAlternateSources,
+			counterAlternateSourceRowId,
+			counterAlternateRequest,
+			counterItemSearchTitle,
+			counterItemSearchSubtitle,
+			counterAuxiliaryOpen,
 			useCompactPosSwitcher,
 			showBottomDock,
 			layoutStyleOverrides,
@@ -576,24 +882,29 @@ export default {
 			commitAdditionalDiscountPercentage,
 			handlePaymentDialogUpdate,
 			handlePaymentDialogAfterLeave,
+			handleCounterItemAdded,
+			handleCounterAlternatesCancelled,
+			handleCounterItemSearchAfterEnter,
+			handleCounterItemSearchAfterLeave,
+			closeCounterItemSearch,
+			handleCounterAuxiliaryUpdate,
+			handleCounterAuxiliaryAfterLeave,
 			discountPercentageOfferName,
 			getCurrencySymbol,
 			invoicePanel,
+			counterItemsSelector,
 			eventBus,
 			dialog,
 		};
 	},
 	data: function () {
-		return {
-			// dialog moved to setup ref
-			itemsLoaded: false,
-			customersLoaded: false,
-		};
+		return {};
 	},
 
 	components: {
 		ItemsSelector,
 		Invoice,
+		CounterGridHealthStrip,
 		OpeningDialog,
 		Payments,
 		Drafts,
@@ -625,11 +936,6 @@ export default {
 				// this.uiStore.setPosSettings(doc); // We might need to implement this if it doesn't exist
 			});
 		},
-		checkLoadingComplete() {
-			if (this.itemsLoaded && this.customersLoaded) {
-				// Loading complete logic
-			}
-		},
 		// handleAddItem removed as ItemsSelector handles pos addition internally
 		handleRegisterPosData(data) {
 			this.pos_profile = data.pos_profile;
@@ -652,31 +958,13 @@ export default {
 			// Watch store for updates
 			this.$watch(
 				() => this.uiStore.posProfile,
-				async (newProfile) => {
+				(newProfile) => {
 					if (newProfile && newProfile.name) {
 						this.pos_profile = newProfile;
 						this.get_offers(newProfile.name, newProfile);
-
-						// Initialize Customers Store
-						const customersStore = useCustomersStore();
-						customersStore.setPosProfile(newProfile);
-						await customersStore.get_customer_names();
 					}
 				},
 				{ deep: true, immediate: true },
-			);
-
-			// Items loading state check
-			const { itemsLoaded } = storeToRefs(this.itemsStore);
-			this.$watch(
-				() => itemsLoaded.value,
-				(val) => {
-					if (val) {
-						this.itemsLoaded = true;
-						this.checkLoadingComplete();
-					}
-				},
-				{ immediate: true },
 			);
 		});
 	},
@@ -684,18 +972,6 @@ export default {
 	created() {
 		// Clean up expired customer balance cache on POS load
 		clearExpiredCustomerBalances();
-		const customersStore = useCustomersStore();
-		const { customersLoaded } = storeToRefs(customersStore);
-		this.$watch(
-			() => customersLoaded.value,
-			(value) => {
-				if (value) {
-					this.customersLoaded = true;
-					this.checkLoadingComplete();
-				}
-			},
-			{ immediate: true },
-		);
 	},
 };
 </script>
@@ -706,13 +982,131 @@ export default {
 }
 
 .dynamic-container {
-	transition: all 0.3s ease;
+	transition: padding 160ms ease;
 	padding-bottom: calc(var(--bottom-safe-space) + var(--dynamic-xs));
 	min-width: 0;
 }
 
-.dynamic-main-row {
+.pos-main-container--counter-grid {
+	--counter-rugged-navy: #09253d;
+	--counter-rugged-navy-raised: #174a70;
+	--counter-rugged-blue: #0f70d7;
+	--counter-rugged-cyan: #38bdf8;
+	--counter-rugged-green: #079b55;
+	--counter-rugged-red: #dc343d;
+	--counter-rugged-line: var(--pos-outline);
+	--counter-rugged-soft-line: var(--pos-border);
+	--counter-rugged-surface: var(--pos-card-bg);
+	--counter-rugged-muted: var(--pos-surface-muted);
 	padding: 0;
+	height: calc(100vh - 64px);
+	height: calc(100dvh - 64px);
+	min-height: 0;
+	overflow: hidden;
+}
+
+.counter-grid-pos {
+	display: grid;
+	grid-template-rows: minmax(0, 1fr) 34px;
+	height: 100%;
+	min-height: 0;
+	background: var(--pos-surface-muted);
+}
+
+.counter-item-search-surface,
+.counter-auxiliary-surface {
+	--counter-rugged-navy: #09253d;
+	--counter-rugged-navy-raised: #174a70;
+	--counter-rugged-blue: #0f70d7;
+	--counter-rugged-cyan: #38bdf8;
+	--counter-rugged-line: var(--pos-outline);
+	--counter-rugged-surface: var(--pos-card-bg);
+	--counter-rugged-muted: var(--pos-surface-muted);
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	max-height: calc(100vh - 24px);
+	max-height: calc(100dvh - 24px);
+	min-height: 0;
+	overflow: hidden;
+	border: 3px solid var(--counter-rugged-navy);
+	border-radius: 5px;
+	background: var(--counter-rugged-muted);
+	box-shadow: 0 5px 14px rgba(4, 22, 37, 0.34);
+}
+
+.counter-item-search-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	min-height: 62px;
+	padding: 8px 10px 8px 16px;
+	border-bottom: 2px solid var(--counter-rugged-cyan);
+	background: var(--counter-rugged-navy);
+}
+
+.counter-item-search-header__copy {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-width: 0;
+}
+
+.counter-item-search-header strong {
+	font-size: 1rem;
+	color: #ffffff;
+}
+
+.counter-item-search-header__copy span {
+	overflow: hidden;
+	color: #d6e7f3;
+	font-size: 0.78rem;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.counter-item-search-header :deep(.v-btn) {
+	border-radius: 3px !important;
+	color: #ffffff !important;
+}
+
+.counter-item-search-header :deep(.v-btn:hover) {
+	background: #174a70 !important;
+}
+
+.counter-item-search-header__source {
+	flex: 0 1 420px;
+	max-width: 420px;
+}
+
+.counter-item-search-header__source :deep(.v-field) {
+	border-radius: 3px;
+	background: var(--pos-input-bg);
+	color: var(--pos-text-primary);
+}
+
+.counter-item-search-surface :deep(.items-selector-shell) {
+	flex: 1 1 auto;
+	min-height: 0;
+	height: min(760px, calc(100vh - 96px));
+	height: min(760px, calc(100dvh - 96px));
+	overflow: hidden;
+}
+
+.counter-item-search-surface :deep(.selection-card) {
+	height: 100% !important;
+	max-height: 100% !important;
+	margin-top: 0 !important;
+	border: 0;
+	border-radius: 0;
+	box-shadow: none;
+	resize: none !important;
+	background: var(--counter-rugged-muted) !important;
+}
+
+.dynamic-main-row {
+	padding: 4px;
 	margin: 0;
 }
 
@@ -721,9 +1115,9 @@ export default {
 }
 
 .dynamic-col {
-	padding: var(--dynamic-sm);
-	transition: padding 0.3s ease;
-	margin-top: var(--dynamic-sm);
+	padding: clamp(6px, 0.8vw, 12px);
+	transition: padding 160ms ease;
+	margin-top: 0;
 }
 
 .dynamic-col--selector,
@@ -748,10 +1142,10 @@ export default {
 .mobile-sale-dock,
 .mobile-pos-dock {
 	padding: 10px;
-	border-radius: 24px;
-	background: color-mix(in srgb, var(--pos-card-bg) 88%, transparent);
-	backdrop-filter: blur(18px);
-	box-shadow: 0 18px 38px var(--pos-shadow);
+	border-radius: var(--pos-radius-lg);
+	background: color-mix(in srgb, var(--pos-card-bg) 94%, transparent);
+	backdrop-filter: blur(16px);
+	box-shadow: var(--pos-elevation-3);
 	border: 1px solid var(--pos-border);
 }
 

@@ -1,7 +1,14 @@
 <template>
 	<div
 		:class="['card-item-card', { 'item-highlighted': isItemHighlighted }]"
+		data-pos-keyboard-target="item-card"
+		:data-testid="`pos-item-card-${item.item_code}`"
+		:data-item-code="item.item_code"
+		tabindex="0"
+		role="button"
+		:aria-label="`${item.item_name || item.item_code}`"
 		@click="onClick"
+		@keydown="onKeyboardSelect"
 		:draggable="true"
 		@dragstart="onDragStart"
 		@dragend="onDragEnd"
@@ -34,30 +41,20 @@
 						<span class="price-amount">
 							{{ formatCurrency(primaryRate, primaryCurrency, primaryPrecision) }}
 						</span>
+						<ItemRateInfoMenu
+							v-if="showRateInfo"
+							:rate-info="rateInfo"
+							:currency-symbol="currencySymbol"
+							:format-currency="formatCurrency"
+							:rate-precision="ratePrecision"
+						/>
 					</div>
 					<div v-if="showSecondaryPrice" class="secondary-price">
 						<span class="currency-symbol">
 							{{ currencySymbol(secondaryCurrency) }}
 						</span>
 						<span class="price-amount">
-							{{ formatCurrency(item.rate, secondaryCurrency, primaryPrecision) }}
-						</span>
-					</div>
-					<div v-if="lastInvoiceRate" class="last-rate-chip">
-						<v-icon size="14" class="mr-1" color="secondary">mdi-history</v-icon>
-						<span class="last-rate-label">{{ __("Last") }}:</span>
-						<span class="last-rate-value">
-							{{ currencySymbol(lastInvoiceRate.currency || posProfile.currency) }}
-							{{
-								formatCurrency(
-									lastInvoiceRate.rate,
-									lastInvoiceRate.currency || posProfile.currency,
-									primaryPrecision,
-								)
-							}}
-							<span v-if="lastInvoiceRate.uom" class="last-rate-uom">
-								/{{ lastInvoiceRate.uom }}
-							</span>
+							{{ formatCurrency(secondaryRate, secondaryCurrency, secondaryPrecision) }}
 						</span>
 					</div>
 				</div>
@@ -81,14 +78,19 @@
 <script setup>
 import { computed } from "vue";
 import placeholderImage from "../placeholder-image.png";
+import ItemRateInfoMenu from "./ItemRateInfoMenu.vue";
+import { priceListToSelectedCurrency } from "../../../utils/erpnextCurrency";
 
 const props = defineProps({
 	item: { type: Object, required: true },
 	posProfile: { type: Object, required: true },
 	context: { type: String, default: "pos" },
 	selectedCurrency: { type: String, default: "" },
+	selectedExchangeRate: { type: Number, default: 1 },
+	selectedConversionRate: { type: Number, default: 1 },
 	hideQtyDecimals: { type: Boolean, default: false },
-	lastInvoiceRate: { type: Object, default: null },
+	showRateInfo: { type: Boolean, default: true },
+	getItemRateInfo: { type: Function, required: true },
 	isItemHighlighted: { type: Boolean, default: false },
 	currencySymbol: { type: Function, required: true },
 	formatCurrency: { type: Function, required: true },
@@ -100,7 +102,14 @@ const props = defineProps({
 const emit = defineEmits(["click", "dragstart", "dragend"]);
 
 const primaryCurrency = computed(() => {
-	if (props.context === "purchase") return props.posProfile.currency;
+	if (props.context === "purchase") {
+		return (
+			props.item.original_currency ||
+			props.item.currency ||
+			props.item.price_list_currency ||
+			props.posProfile.currency
+		);
+	}
 	return (
 		props.item.original_currency ||
 		props.item.currency ||
@@ -111,7 +120,7 @@ const primaryCurrency = computed(() => {
 
 const primaryRate = computed(() => {
 	if (props.context === "purchase") {
-		return props.item.rate || props.item.standard_rate || 0;
+		return props.item.original_rate ?? props.item.rate ?? props.item.standard_rate ?? 0;
 	}
 	return props.item.original_rate ?? props.item.rate ?? 0;
 });
@@ -119,6 +128,25 @@ const primaryRate = computed(() => {
 const primaryPrecision = computed(() => {
 	return props.ratePrecision(primaryRate.value);
 });
+
+const secondaryRate = computed(() => {
+	return priceListToSelectedCurrency(
+		{
+			pos_profile: props.posProfile,
+			price_list_currency: primaryCurrency.value,
+			selected_currency: props.selectedCurrency || props.posProfile.currency,
+			exchange_rate: props.selectedExchangeRate,
+			conversion_rate: props.selectedConversionRate,
+		},
+		primaryRate.value,
+	);
+});
+
+const secondaryPrecision = computed(() => {
+	return props.ratePrecision(secondaryRate.value);
+});
+
+const rateInfo = computed(() => props.getItemRateInfo(props.item));
 
 const secondaryCurrency = computed(() => props.selectedCurrency);
 
@@ -146,6 +174,15 @@ const onClick = (event) => {
 	emit("click", event, props.item);
 };
 
+const onKeyboardSelect = (event) => {
+	const key = event?.key || "";
+	if (key !== "Enter" && key !== " ") {
+		return;
+	}
+	event.preventDefault?.();
+	emit("click", event, props.item);
+};
+
 const onDragStart = (event) => {
 	emit("dragstart", event, props.item);
 };
@@ -159,7 +196,7 @@ const onDragEnd = (event) => {
 .card-item-card {
 	background: var(--pos-surface-raised);
 	border-radius: var(--pos-radius-md);
-	border: 1px solid var(--pos-border-light);
+	border: 1px solid var(--pos-border);
 	overflow: hidden;
 	transition:
 		transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
@@ -171,7 +208,7 @@ const onDragEnd = (event) => {
 	flex-direction: column;
 	height: 100%;
 	width: 100%;
-	box-shadow: 0 10px 24px var(--pos-shadow-light);
+	box-shadow: var(--pos-elevation-1);
 	will-change: transform;
 	backface-visibility: hidden;
 	transform: translate3d(0, 0, 0);
@@ -179,18 +216,18 @@ const onDragEnd = (event) => {
 }
 
 .card-item-card:hover {
-	transform: translate3d(0, -3px, 0);
-	box-shadow: 0 16px 32px var(--pos-shadow);
-	border-color: rgba(var(--v-theme-primary), 0.35);
+	transform: translate3d(0, -2px, 0);
+	box-shadow: var(--pos-elevation-2);
+	border-color: var(--pos-primary);
 }
 
 .card-item-card.item-highlighted {
-	border-color: rgb(var(--v-theme-primary));
+	border-color: var(--pos-primary);
 	box-shadow:
-		0 0 0 3px rgba(var(--v-theme-primary), 0.35),
-		0 12px 28px rgba(var(--v-theme-primary), 0.2);
-	transform: translate3d(0, -2px, 0);
-	background: rgba(var(--v-theme-primary), 0.08);
+		0 0 0 3px var(--pos-focus-halo),
+		var(--pos-elevation-2);
+	transform: translate3d(0, -1px, 0);
+	background: var(--pos-primary-container);
 }
 
 .card-item-image-container {
@@ -198,7 +235,13 @@ const onDragEnd = (event) => {
 	height: 132px;
 	flex-shrink: 0;
 	overflow: hidden;
-	background: var(--pos-surface-muted);
+	background:
+		linear-gradient(
+			145deg,
+			color-mix(in srgb, var(--pos-primary-container) 42%, transparent),
+			transparent 64%
+		),
+		var(--pos-surface-muted);
 }
 
 .card-item-image {
@@ -235,7 +278,7 @@ const onDragEnd = (event) => {
 
 .card-item-name {
 	font-size: 0.98rem;
-	font-weight: 700;
+	font-weight: 650;
 	margin: 0;
 	line-height: 1.35;
 	color: var(--pos-text-primary);
@@ -247,13 +290,14 @@ const onDragEnd = (event) => {
 }
 
 .card-item-code {
-	font-size: 0.74rem;
+	font-size: 0.72rem;
 	color: var(--pos-text-secondary);
 	display: block;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	letter-spacing: 0.02em;
+	letter-spacing: 0.045em;
+	text-transform: uppercase;
 }
 
 .card-item-details {
@@ -276,30 +320,15 @@ const onDragEnd = (event) => {
 	align-items: baseline;
 	flex-wrap: wrap;
 	gap: var(--pos-space-1);
-	font-weight: 700;
+	font-weight: 750;
 	color: var(--pos-primary);
-	font-size: 1.05rem;
+	font-size: 1.08rem;
+	font-variant-numeric: tabular-nums;
 }
 
 .secondary-price {
 	font-size: 0.8rem;
 	color: var(--pos-text-secondary);
-}
-
-.last-rate-chip {
-	font-size: 0.75rem;
-	color: var(--pos-secondary);
-	background: var(--pos-hover-bg);
-	padding: 4px 8px;
-	border-radius: var(--pos-radius-xs);
-	display: inline-flex;
-	align-items: center;
-	width: fit-content;
-}
-
-.last-rate-value {
-	margin-left: 4px;
-	font-weight: 500;
 }
 
 .card-item-stock {
@@ -312,12 +341,14 @@ const onDragEnd = (event) => {
 	gap: 6px;
 	padding: 6px 8px;
 	border-radius: var(--pos-radius-xs);
-	background: var(--pos-hover-bg);
+	border: 1px solid var(--pos-border-light);
+	background: var(--pos-surface-muted);
 	white-space: nowrap;
 }
 
 .stock-amount {
-	font-weight: 600;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
 }
 
 .stock-amount.negative-number {

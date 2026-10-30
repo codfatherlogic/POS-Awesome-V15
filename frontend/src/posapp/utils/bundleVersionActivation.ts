@@ -31,7 +31,9 @@ function safeStorageSetItem(storage: Storage | null, key: string, value: string)
 
 	try {
 		storage.setItem(key, value);
-	} catch {}
+	} catch {
+		// Session storage writes can fail in restricted browser contexts.
+	}
 }
 
 function safeStorageRemoveItem(storage: Storage | null, key: string) {
@@ -41,7 +43,9 @@ function safeStorageRemoveItem(storage: Storage | null, key: string) {
 
 	try {
 		storage.removeItem(key);
-	} catch {}
+	} catch {
+		// Session storage cleanup is best-effort.
+	}
 }
 
 function getPendingBundleActivationVersion(): string | null {
@@ -117,8 +121,20 @@ export async function finalizePendingBundleActivation(
 	);
 
 	if (payload?.type === "SW_VERSION_INFO" && payload.version === pendingVersion) {
-		clearPendingBundleActivation();
-		return true;
+		const healthAck: any = await postMessageToActiveServiceWorker(
+			{
+				type: "ACK_CACHE_HEALTH",
+				version: pendingVersion,
+			},
+			timeoutMs,
+		);
+		if (
+			healthAck?.type === "SW_CACHE_HEALTH_ACK" &&
+			healthAck.version === pendingVersion
+		) {
+			clearPendingBundleActivation();
+			return true;
+		}
 	}
 
 	return false;

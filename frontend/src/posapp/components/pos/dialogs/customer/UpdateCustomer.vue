@@ -99,7 +99,7 @@
 							<v-col cols="6">
 								<v-select
 									density="compact"
-									label="Gender"
+									:label="__('Gender')"
 									:items="genders"
 									v-model="gender"
 									class="pos-themed-input"
@@ -608,9 +608,50 @@ export default {
 			};
 
 			const customersStore = useCustomersStore();
+			if (!this.customer_id) {
+				let duplicateCustomers = await customersStore.findLocalDuplicateCustomers(args);
+				if (!isOffline() && !duplicateCustomers.length) {
+					const duplicateResponse = await frappe.call({
+						method: "posawesome.posawesome.api.customers.find_duplicate_customers",
+						args: {
+							customer_name: args.customer_name,
+							mobile_no: args.mobile_no,
+							email_id: args.email_id,
+							tax_id: args.tax_id,
+							company: vm.pos_profile.company,
+							pos_profile_doc: JSON.stringify(vm.pos_profile),
+						},
+					});
+					duplicateCustomers = duplicateResponse.message || [];
+				}
+
+				if (duplicateCustomers.length) {
+					const existing = duplicateCustomers[0];
+					const existingLabel = existing.customer_name || existing.name;
+					const useExisting = window.confirm(
+						__("An existing customer matches these details: {0}. Select it instead?", [
+							existingLabel,
+						]),
+					);
+					if (useExisting) {
+						await customersStore.addOrUpdateCustomer(existing);
+						vm.toastStore.show({
+							title: __("Existing customer selected"),
+							color: "info",
+						});
+						vm.close_dialog();
+					} else {
+						vm.toastStore.show({
+							title: __("Customer was not created. Review the matching details."),
+							color: "warning",
+						});
+					}
+					return;
+				}
+			}
 
 			if (isOffline()) {
-				saveOfflineCustomer({ args: apiArgs });
+				await saveOfflineCustomer({ args: apiArgs });
 				vm.toastStore.show({ title: __("Customer saved offline"), color: "warning" });
 				args.name = this.customer_name;
 				await customersStore.addOrUpdateCustomer({

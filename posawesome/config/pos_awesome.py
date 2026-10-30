@@ -1,4 +1,5 @@
 from __future__ import unicode_literals
+
 from frappe import _
 
 
@@ -27,6 +28,18 @@ def get_data():
                     "type": "doctype",
                     "description": "POS Closing Shift",
                     "name": "POS Closing Shift",
+                },
+                {
+                    "type": "doctype",
+                    "description": "Completed and cancelled POS item exchanges",
+                    "name": "POS Item Exchange",
+                },
+                {
+                    "type": "report",
+                    "description": "Audit item exchange documents and settlement totals",
+                    "name": "POS Item Exchange Audit",
+                    "doctype": "POS Item Exchange",
+                    "is_query_report": True,
                 },
                 {
                     "type": "doctype",

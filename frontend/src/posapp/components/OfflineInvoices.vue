@@ -47,14 +47,14 @@
 						</div>
 						<div class="header-close-section">
 							<v-btn
-								icon="mdi-close"
+								icon
 								variant="text"
 								size="large"
-								color="error"
 								class="header-close-btn"
 								@click="dialog = false"
 								:aria-label="__('Close offline invoices dialog')"
 							>
+								<v-icon icon="mdi-close" size="26" aria-hidden="true" />
 								<v-tooltip activator="parent" location="bottom">
 									{{ __("Close Dialog") }}
 								</v-tooltip>
@@ -198,11 +198,7 @@
 <script setup>
 import { ref, watch } from "vue";
 import { formatUtils } from "../format";
-import {
-	getOfflineInvoices,
-	deleteOfflineInvoice,
-	getPendingOfflineInvoiceCount,
-} from "../../offline/index";
+import { getOfflineInvoices, deleteOfflineInvoice, getPendingOfflineInvoiceCount } from "../../offline/index";
 
 defineOptions({
 	name: "OfflineInvoicesDialog",
@@ -213,6 +209,10 @@ const props = defineProps({
 	posProfile: {
 		type: Object,
 		default: () => ({}),
+	},
+	pendingCount: {
+		type: Number,
+		default: 0,
 	},
 });
 
@@ -265,6 +265,15 @@ watch(dialog, (val) => {
 	emit("update:modelValue", val);
 });
 
+watch(
+	() => props.pendingCount,
+	() => {
+		if (dialog.value) {
+			loadInvoices();
+		}
+	},
+);
+
 function formatCurrency(value, precision) {
 	if (value === null || value === undefined) {
 		value = 0;
@@ -295,11 +304,11 @@ function loadInvoices() {
 	invoices.value = getOfflineInvoices();
 }
 
-function removeInvoice(index) {
+async function removeInvoice(index) {
 	if (!props.posProfile.posa_allow_delete_offline_invoice) {
 		return;
 	}
-	deleteOfflineInvoice(index);
+	await deleteOfflineInvoice(index);
 	loadInvoices();
 	emit("deleted", getPendingOfflineInvoiceCount());
 }
@@ -491,32 +500,39 @@ function removeInvoice(index) {
 	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2) !important;
 }
 
-/* Header Close Button - Neutral with Red Icon */
+/* Header Close Button */
 .header-close-btn {
 	width: 48px !important;
 	height: 48px !important;
 	border-radius: 12px !important;
-	background: rgba(255, 255, 255, 0.15) !important;
-	border: 1px solid rgba(255, 255, 255, 0.2) !important;
-	color: #f44336 !important;
+	background: rgba(255, 255, 255, 0.16) !important;
+	border: 1px solid rgba(255, 255, 255, 0.42) !important;
+	color: #ffffff !important;
 	transition: all 0.3s ease !important;
 	backdrop-filter: blur(10px);
 }
 
 .header-close-btn:hover {
-	background: rgba(244, 67, 54, 0.1) !important;
-	border-color: rgba(244, 67, 54, 0.3) !important;
+	background: rgba(255, 255, 255, 0.28) !important;
+	border-color: rgba(255, 255, 255, 0.72) !important;
 	transform: scale(1.05) !important;
-	color: #d32f2f !important;
+	color: #ffffff !important;
 }
 
-/* Force red color for the close icon */
 .header-close-btn .v-icon {
-	color: #f44336 !important;
+	display: inline-flex !important;
+	visibility: visible !important;
+	opacity: 1 !important;
+	color: #ffffff !important;
 }
 
 .header-close-btn:hover .v-icon {
-	color: #d32f2f !important;
+	color: #ffffff !important;
+}
+
+.header-close-btn:focus-visible {
+	outline: 3px solid #ffffff !important;
+	outline-offset: 2px;
 }
 
 /* Footer Divider */

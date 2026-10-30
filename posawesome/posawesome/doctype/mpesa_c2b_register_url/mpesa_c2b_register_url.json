@@ -9,6 +9,7 @@
   "mpesa_settings",
   "till_number",
   "business_shortcode",
+  "callback_secret",
   "column_break_4",
   "company",
   "mode_of_payment",
@@ -37,6 +38,13 @@
    "fieldtype": "Data",
    "label": "Business Shortcode",
    "read_only": 1
+  },
+  {
+   "description": "Secret token embedded in the provider callback URLs.",
+   "fieldname": "callback_secret",
+   "fieldtype": "Password",
+   "label": "Callback Secret",
+   "reqd": 1
   },
   {
    "fieldname": "column_break_4",

@@ -1,5 +1,5 @@
 import { ref } from "vue";
-import { initPromise } from "../../../../offline/index";
+import { startupInitPromise } from "../../../../offline/index";
 
 type EventBus = {
 	emit: (_event: string, _payload?: unknown) => void;
@@ -84,7 +84,7 @@ export function useItemsLoader() {
 			eventBus.emit("data-load-progress", { name: "items", progress: 0 });
 		}
 
-		await initPromise;
+		await startupInitPromise;
 		const ensureStorageHealth = getCtx<
 			LoaderContext["ensureStorageHealth"]
 		>("ensureStorageHealth");

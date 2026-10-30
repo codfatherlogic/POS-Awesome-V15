@@ -8,7 +8,11 @@ export type Events = {
 
 const bus: Emitter<Events> = mitt<Events>();
 
-export default {
+const eventBusPlugin = {
+  emit: bus.emit.bind(bus),
+  on: bus.on.bind(bus),
+  off: bus.off.bind(bus),
+  all: bus.all,
   install: (app: App) => {
     app.config.globalProperties.__ = window.__;
     app.config.globalProperties.frappe = window.frappe;
@@ -21,4 +25,5 @@ export default {
   },
 };
 
+export default eventBusPlugin;
 export { bus };

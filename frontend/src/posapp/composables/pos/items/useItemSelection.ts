@@ -16,7 +16,12 @@ type FlyConfig = Record<string, unknown>;
 type ItemSelectionContext = {
 	items: SelectableItem[];
 	displayedItems: SelectableItem[];
-	addItem: ((_item: SelectableItem) => Promise<void> | void) | null;
+	addItem:
+		| ((
+				_item: SelectableItem,
+				_options?: { postAddFocus?: "default" | "qty" },
+		  ) => Promise<void> | void)
+		| null;
 	clearSearch: (() => void) | null;
 	focusItemSearch: (() => void) | null;
 	fly:
@@ -36,6 +41,8 @@ export function useItemSelection() {
 	// State
 	const highlightedIndex = ref(-1);
 	const highlightedItemCode = ref<string | null>(null);
+	const resultNavigationActive = ref(false);
+	const RESULT_PAGE_SIZE = 10;
 
 	// Context (Late Binding)
 	const ctx: ItemSelectionContext = {
@@ -54,10 +61,7 @@ export function useItemSelection() {
 			return;
 		}
 
-		Object.defineProperties(
-			ctx,
-			Object.getOwnPropertyDescriptors(context),
-		);
+		Object.defineProperties(ctx, Object.getOwnPropertyDescriptors(context));
 	}
 
 	// --- Highlighting Logic ---
@@ -65,6 +69,7 @@ export function useItemSelection() {
 	function clearHighlightedItem() {
 		highlightedIndex.value = -1;
 		highlightedItemCode.value = null;
+		resultNavigationActive.value = false;
 	}
 
 	function syncHighlightedItem() {
@@ -118,7 +123,71 @@ export function useItemSelection() {
 
 		highlightedIndex.value = nextIndex;
 		highlightedItemCode.value = nextItem.item_code || null;
+		resultNavigationActive.value = true;
 		// Scroll logic is watcher-driven in the component
+	}
+
+	function highlightItemAt(index: number, activateNavigation = true) {
+		if (
+			!Array.isArray(ctx.displayedItems) ||
+			ctx.displayedItems.length === 0
+		) {
+			clearHighlightedItem();
+			return false;
+		}
+		const nextIndex = Math.max(
+			0,
+			Math.min(index, ctx.displayedItems.length - 1),
+		);
+		const nextItem = ctx.displayedItems[nextIndex];
+		if (!nextItem) return false;
+		highlightedIndex.value = nextIndex;
+		highlightedItemCode.value = nextItem.item_code || null;
+		resultNavigationActive.value = activateNavigation;
+		return true;
+	}
+
+	function activateResultNavigation() {
+		resultNavigationActive.value = true;
+		if (highlightedIndex.value < 0) highlightFirstItem();
+	}
+
+	function isResultNavigationBoundary(direction: number) {
+		if (
+			!Array.isArray(ctx.displayedItems) ||
+			ctx.displayedItems.length === 0 ||
+			(highlightedIndex.value < 0 && !highlightedItemCode.value)
+		) {
+			return false;
+		}
+		const codeIndex = highlightedItemCode.value
+			? findItemIndexByCode(ctx.displayedItems, highlightedItemCode.value)
+			: -1;
+		const activeIndex = codeIndex >= 0 ? codeIndex : highlightedIndex.value;
+		if (activeIndex < 0) return false;
+		return direction > 0
+			? activeIndex >= ctx.displayedItems.length - 1
+			: activeIndex <= 0;
+	}
+
+	function highlightFirstItem() {
+		if (
+			!Array.isArray(ctx.displayedItems) ||
+			ctx.displayedItems.length === 0
+		) {
+			clearHighlightedItem();
+			return false;
+		}
+
+		const firstItem = ctx.displayedItems[0];
+		if (!firstItem) {
+			clearHighlightedItem();
+			return false;
+		}
+
+		highlightedIndex.value = 0;
+		highlightedItemCode.value = firstItem.item_code || null;
+		return true;
 	}
 
 	function resolveHighlightedItem(item: unknown): SelectableItem | unknown {
@@ -147,12 +216,18 @@ export function useItemSelection() {
 	}
 
 	function getItemRowProps(item: unknown) {
-		return isItemHighlighted(item) ? { class: "item-row-highlighted" } : {};
+		const highlighted = isItemHighlighted(item);
+		return {
+			"aria-selected": highlighted ? "true" : "false",
+			class: { "item-row-highlighted": highlighted },
+		};
 	}
 
 	// --- Selection Logic ---
 
-	async function selectHighlightedItem() {
+	async function selectHighlightedItem(
+		options: { postAddFocus?: "default" | "qty" } = {},
+	) {
 		if (
 			!Array.isArray(ctx.displayedItems) ||
 			ctx.displayedItems.length === 0
@@ -171,7 +246,7 @@ export function useItemSelection() {
 		}
 
 		if (ctx.addItem) {
-			await ctx.addItem(item);
+			await ctx.addItem(item, options);
 		}
 
 		clearHighlightedItem();
@@ -194,11 +269,46 @@ export function useItemSelection() {
 
 	// --- Mouse Interaction ---
 
+	function createCartTopAnchor(container: HTMLElement) {
+		const rect = container.getBoundingClientRect();
+		const anchor = document.createElement("div");
+		anchor.className = "item-fly-target-anchor";
+		anchor.style.position = "fixed";
+		anchor.style.left = `${rect.left + rect.width / 2}px`;
+		anchor.style.top = `${rect.top + 24}px`;
+		anchor.style.width = "1px";
+		anchor.style.height = "1px";
+		anchor.style.pointerEvents = "none";
+		anchor.style.opacity = "0";
+		document.body.appendChild(anchor);
+		return anchor;
+	}
+
+	function resolveFlyTarget() {
+		const cartContainer = document.querySelector(
+			".posa-items-table-container",
+		) as HTMLElement | null;
+		if (cartContainer) {
+			const anchor = createCartTopAnchor(cartContainer);
+			return {
+				target: anchor,
+				cleanup: () => anchor.remove(),
+			};
+		}
+
+		const selectorContainer = document.querySelector(
+			".items-table-container",
+		) as HTMLElement | null;
+		return {
+			target: selectorContainer,
+			cleanup: null as (() => void) | null,
+		};
+	}
+
 	function triggerFlyAnimation(event: MouseEvent, isRow = false) {
 		if (!ctx.fly) return;
 
-		const targets = document.querySelectorAll(".items-table-container");
-		const target = targets[targets.length - 1]; // The Cart table container
+		const { target, cleanup } = resolveFlyTarget();
 
 		if (!target) return;
 
@@ -210,6 +320,8 @@ export function useItemSelection() {
 			placeholder.style.width = "40px";
 			placeholder.style.height = "40px";
 			placeholder.style.borderRadius = "50%";
+			placeholder.style.backgroundColor = "rgba(25, 118, 210, 0.22)";
+			placeholder.style.boxShadow = "0 8px 18px rgba(0, 0, 0, 0.18)";
 			placeholder.style.position = "fixed";
 			placeholder.style.top = `${event.clientY - 20}px`;
 			placeholder.style.left = `${event.clientX - 20}px`;
@@ -217,12 +329,6 @@ export function useItemSelection() {
 
 			ctx.fly(placeholder, target, ctx.flyConfig);
 
-			// Cleanup placeholder after animation starts?
-			// The original code does `placeholder.remove()` immediately?
-			// "this.fly(placeholder, target, this.flyConfig); placeholder.remove();"
-			// Wait, if removed immediately, does it animate?
-			// `useFlyAnimation` likely clones it or uses it as start pos.
-			// Let's assume original code works.
 			placeholder.remove();
 		} else {
 			// For card click
@@ -234,6 +340,7 @@ export function useItemSelection() {
 				ctx.fly(source, target, ctx.flyConfig);
 			}
 		}
+		cleanup?.();
 	}
 
 	function handleItemSelection(event: MouseEvent, item: SelectableItem) {
@@ -265,16 +372,36 @@ export function useItemSelection() {
 			return true; // handled
 		}
 
+		if (key === "PageDown" || key === "PageUp") {
+			event.preventDefault();
+			const direction = key === "PageDown" ? 1 : -1;
+			const startIndex =
+				highlightedIndex.value < 0 ? 0 : highlightedIndex.value;
+			highlightItemAt(startIndex + direction * RESULT_PAGE_SIZE);
+			return true;
+		}
+
+		if (resultNavigationActive.value && (key === "Home" || key === "End")) {
+			event.preventDefault();
+			highlightItemAt(key === "Home" ? 0 : ctx.displayedItems.length - 1);
+			return true;
+		}
+
 		return false; // not handled
 	}
 
 	return {
 		highlightedIndex,
 		highlightedItemCode,
+		resultNavigationActive,
 		registerContext,
 		clearHighlightedItem,
 		syncHighlightedItem,
 		navigateHighlightedItem,
+		highlightFirstItem,
+		highlightItemAt,
+		activateResultNavigation,
+		isResultNavigationBoundary,
 		selectHighlightedItem,
 		isItemHighlighted,
 		getItemRowClass,

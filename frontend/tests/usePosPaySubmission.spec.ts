@@ -50,6 +50,8 @@ describe("usePosPaySubmission", () => {
 			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
 			exchangeRate: ref(1),
 			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
 			autoAllocatePaymentAmount: ref(true),
 			payment_methods: ref([{ mode_of_payment: "Cash", amount: 100 }]),
 			selected_invoices: ref([]),
@@ -105,6 +107,8 @@ describe("usePosPaySubmission", () => {
 			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
 			exchangeRate: ref(1),
 			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
 			autoAllocatePaymentAmount: ref(true),
 			payment_methods: ref([{ mode_of_payment: "Online", amount: 32000 }]),
 			selected_invoices: ref([]),
@@ -132,6 +136,66 @@ describe("usePosPaySubmission", () => {
 		});
 	});
 
+	it("preserves per-entry tender currency metadata in the payment payload", async () => {
+		let submittedPayload: any = null;
+		(globalThis as any).frappe.call.mockImplementation(({ args, callback }: any) => {
+			submittedPayload = args.payload;
+			callback({ message: { new_payments_entry: [{ name: "ACC-PAY-0006" }] } });
+		});
+
+		const { processPayment } = usePosPaySubmission({
+			customerName: ref("Customer 727"),
+			company: ref("Test Company"),
+			posProfile: ref({ name: "Main POS" }),
+			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
+			exchangeRate: ref(285),
+			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
+			autoAllocatePaymentAmount: ref(false),
+			payment_methods: ref([
+				{
+					mode_of_payment: "Cash",
+					amount: 29.93,
+					payment_currency: "PKR",
+					invoice_equivalent: 0.105,
+					invoice_exchange_rate: 0.003508772,
+					company_exchange_rate: 1,
+					rate_date: "2026-08-21",
+					rate_source: "currency_exchange",
+					bank_account: "Cash PKR - TC",
+				},
+			]),
+			selected_invoices: ref([]),
+			selected_payments: ref([]),
+			selected_mpesa_payments: ref([]),
+			total_selected_payments: ref(0),
+			total_selected_mpesa_payments: ref(0),
+			total_payment_methods: ref(0.105),
+			clearSelections: vi.fn(),
+			resetPaymentMethodAmounts: vi.fn(),
+			load_print_page: vi.fn(),
+			eventBus: { emit: vi.fn() },
+			get_outstanding_invoices: vi.fn(),
+			get_unallocated_payments: vi.fn(),
+			get_draft_mpesa_payments_register: vi.fn(),
+			set_mpesa_search_params: vi.fn(),
+			autoReconcile: vi.fn(),
+		});
+
+		await processPayment();
+
+		expect(submittedPayload.payment_methods[0]).toMatchObject({
+			amount: 29.93,
+			original_amount: 29.93,
+			payment_currency: "PKR",
+			invoice_equivalent: 0.105,
+			invoice_exchange_rate: 0.003508772,
+			exchange_rate: 1,
+			bank_account: "Cash PKR - TC",
+		});
+	});
+
 	it("clears entered payment method amounts after a successful submit", async () => {
 		(globalThis as any).frappe.call.mockImplementation(({ callback }: any) => {
 			callback({
@@ -153,6 +217,8 @@ describe("usePosPaySubmission", () => {
 			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
 			exchangeRate: ref(1),
 			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
 			autoAllocatePaymentAmount: ref(false),
 			payment_methods: paymentMethods,
 			selected_invoices: ref([]),
@@ -204,6 +270,8 @@ describe("usePosPaySubmission", () => {
 			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
 			exchangeRate: ref(1),
 			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
 			autoAllocatePaymentAmount: ref(false),
 			payment_methods: ref([{ mode_of_payment: "Cash", amount: 100 }]),
 			selected_invoices: ref([]),
@@ -227,5 +295,192 @@ describe("usePosPaySubmission", () => {
 		await processPayment();
 
 		expect(autoReconcile).not.toHaveBeenCalled();
+	});
+
+	it("includes the selected posting date in the payment payload", async () => {
+		(globalThis as any).frappe.call.mockImplementation(({ callback }: any) => {
+			callback({
+				message: {
+					new_payments_entry: [{ name: "ACC-PAY-0005" }],
+				},
+			});
+		});
+
+		const postingDate = ref("2026-03-29");
+
+		const { processPayment } = usePosPaySubmission({
+			customerName: ref("Customer 727"),
+			company: ref("Test Company"),
+			posProfile: ref({ name: "Main POS" }),
+			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
+			postingDate,
+			exchangeRate: ref(1),
+			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
+			autoAllocatePaymentAmount: ref(false),
+			payment_methods: ref([{ mode_of_payment: "Cash", amount: 100 }]),
+			selected_invoices: ref([]),
+			selected_payments: ref([]),
+			selected_mpesa_payments: ref([]),
+			total_selected_invoices: ref(0),
+			total_selected_payments: ref(0),
+			total_selected_mpesa_payments: ref(0),
+			total_payment_methods: ref(100),
+			clearSelections: vi.fn(),
+			resetPaymentMethodAmounts: vi.fn(),
+			load_print_page: vi.fn(),
+			eventBus: { emit: vi.fn() },
+			get_outstanding_invoices: vi.fn(),
+			get_unallocated_payments: vi.fn(),
+			get_draft_mpesa_payments_register: vi.fn(),
+			set_mpesa_search_params: vi.fn(),
+			autoReconcile: vi.fn(),
+		});
+
+		await processPayment();
+
+		const callConfig = (globalThis as any).frappe.call.mock.calls[0][0];
+		expect(callConfig.args.payload.posting_date).toBe("2026-03-29");
+	});
+
+	it("sends posting date and opening shift when the user leaves reference fields blank", async () => {
+		(globalThis as any).frappe.call.mockImplementation(({ callback }: any) => {
+			callback({
+				message: {
+					new_payments_entry: [{ name: "ACC-PAY-0007" }],
+				},
+			});
+		});
+
+		const { processPayment } = usePosPaySubmission({
+			customerName: ref("Customer 727"),
+			company: ref("Test Company"),
+			posProfile: ref({ name: "Main POS" }),
+			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
+			postingDate: ref("2026-04-03"),
+			exchangeRate: ref(1),
+			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref("   "),
+			referenceDate: ref(""),
+			autoAllocatePaymentAmount: ref(false),
+			payment_methods: ref([{ mode_of_payment: "Cash", amount: 100 }]),
+			selected_invoices: ref([]),
+			selected_payments: ref([]),
+			selected_mpesa_payments: ref([]),
+			total_selected_invoices: ref(0),
+			total_selected_payments: ref(0),
+			total_selected_mpesa_payments: ref(0),
+			total_payment_methods: ref(100),
+			clearSelections: vi.fn(),
+			resetPaymentMethodAmounts: vi.fn(),
+			load_print_page: vi.fn(),
+			eventBus: { emit: vi.fn() },
+			get_outstanding_invoices: vi.fn(),
+			get_unallocated_payments: vi.fn(),
+			get_draft_mpesa_payments_register: vi.fn(),
+			set_mpesa_search_params: vi.fn(),
+			autoReconcile: vi.fn(),
+		});
+
+		await processPayment();
+
+		const callConfig = (globalThis as any).frappe.call.mock.calls[0][0];
+		expect(callConfig.args.payload.reference_no).toBe("POS-OPEN-0001");
+		expect(callConfig.args.payload.reference_date).toBe("2026-04-03");
+	});
+
+	it("includes generic payment and party fields for supplier pay mode", async () => {
+		(globalThis as any).frappe.call.mockImplementation(({ callback }: any) => {
+			callback({
+				message: {
+					new_payments_entry: [{ name: "ACC-PAY-0006" }],
+				},
+			});
+		});
+
+		const { processPayment } = usePosPaySubmission({
+			customerName: ref("Supp-001"),
+			partyName: ref("Supp-001"),
+			partyType: ref("Supplier"),
+			paymentType: ref("Pay"),
+			company: ref("Test Company"),
+			posProfile: ref({ name: "Main POS" }),
+			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
+			postingDate: ref("2026-03-30"),
+			exchangeRate: ref(1),
+			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
+			autoAllocatePaymentAmount: ref(false),
+			payment_methods: ref([{ mode_of_payment: "Bank", amount: 250 }]),
+			selected_invoices: ref([]),
+			selected_payments: ref([]),
+			selected_mpesa_payments: ref([]),
+			total_selected_invoices: ref(0),
+			total_selected_payments: ref(0),
+			total_selected_mpesa_payments: ref(0),
+			total_payment_methods: ref(250),
+			clearSelections: vi.fn(),
+			resetPaymentMethodAmounts: vi.fn(),
+			load_print_page: vi.fn(),
+			eventBus: { emit: vi.fn() },
+			get_outstanding_invoices: vi.fn(),
+			get_unallocated_payments: vi.fn(),
+			get_draft_mpesa_payments_register: vi.fn(),
+			set_mpesa_search_params: vi.fn(),
+			autoReconcile: vi.fn(),
+		} as any);
+
+		await processPayment();
+
+		const callConfig = (globalThis as any).frappe.call.mock.calls[0][0];
+		expect(callConfig.args.payload.payment_type).toBe("Pay");
+		expect(callConfig.args.payload.party_type).toBe("Supplier");
+		expect(callConfig.args.payload.party).toBe("Supp-001");
+	});
+
+	it("adds a stable client request id to payment submissions", async () => {
+		(globalThis as any).frappe.call.mockImplementation(({ callback }: any) => {
+			callback({
+				message: {
+					new_payments_entry: [{ name: "ACC-PAY-1000" }],
+				},
+			});
+		});
+
+		const { processPayment } = usePosPaySubmission({
+			customerName: ref("Customer 727"),
+			company: ref("Test Company"),
+			posProfile: ref({ name: "Main POS" }),
+			posOpeningShift: ref({ name: "POS-OPEN-0001" }),
+			exchangeRate: ref(1),
+			invoiceTotalCurrency: ref("USD"),
+			referenceNo: ref(""),
+			referenceDate: ref(""),
+			autoAllocatePaymentAmount: ref(false),
+			payment_methods: ref([{ mode_of_payment: "Cash", amount: 100 }]),
+			selected_invoices: ref([]),
+			selected_payments: ref([]),
+			selected_mpesa_payments: ref([]),
+			total_selected_invoices: ref(0),
+			total_selected_payments: ref(0),
+			total_selected_mpesa_payments: ref(0),
+			total_payment_methods: ref(100),
+			clearSelections: vi.fn(),
+			resetPaymentMethodAmounts: vi.fn(),
+			load_print_page: vi.fn(),
+			eventBus: { emit: vi.fn() },
+			get_outstanding_invoices: vi.fn(),
+			get_unallocated_payments: vi.fn(),
+			get_draft_mpesa_payments_register: vi.fn(),
+			set_mpesa_search_params: vi.fn(),
+			autoReconcile: vi.fn(),
+		});
+
+		await processPayment();
+
+		const callConfig = (globalThis as any).frappe.call.mock.calls[0][0];
+		expect(callConfig.args.payload.client_request_id).toEqual(expect.any(String));
 	});
 });

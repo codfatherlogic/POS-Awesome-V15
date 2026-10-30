@@ -28,14 +28,17 @@ export function useItemsIntegration(options: IntegrationOptions = {}) {
 	const {
 		items,
 		filteredItems,
+		filteredItemsSearchTerm,
 		itemGroups,
 		isLoading,
 		isBackgroundLoading,
 		loadProgress,
+		syncedItemsCount,
 		totalItemCount,
 		itemsLoaded,
 		searchTerm,
 		itemGroup,
+		lastItemCatalogSyncTime,
 		posProfile,
 		customer,
 		customerPriceList,
@@ -96,7 +99,21 @@ export function useItemsIntegration(options: IntegrationOptions = {}) {
 	};
 
 	const forceReloadItems = async () => {
-		return await itemsStore.refreshItems();
+		return await itemsStore.recoverItemCatalog({
+			reason: "reload_button",
+			preserveSearch: true,
+		});
+	};
+
+	const recoverItemCatalog = async (reason = "manual") => {
+		return await itemsStore.recoverItemCatalog({
+			reason,
+			preserveSearch: true,
+		});
+	};
+
+	const recoverItemCatalogIfUnhealthy = async (reason = "resume") => {
+		return await itemsStore.recoverItemCatalogIfUnhealthy(reason);
 	};
 
 	const refreshModifiedItems = async (
@@ -137,8 +154,7 @@ export function useItemsIntegration(options: IntegrationOptions = {}) {
 	};
 
 	const update_items_details = async (_itemList: unknown[]) => {
-		// This is now handled automatically by the store in background
-		// Keep for compatibility but don't need to do anything
+		// Compatibility shim: item detail refresh now runs through the store-managed path.
 		return Promise.resolve(undefined);
 	};
 
@@ -263,14 +279,17 @@ export function useItemsIntegration(options: IntegrationOptions = {}) {
 		// Store state (reactive)
 		items,
 		filteredItems,
+		filteredItemsSearchTerm,
 		itemGroups,
 		isLoading,
 		isBackgroundLoading,
 		loadProgress,
+		syncedItemsCount,
 		totalItemCount,
 		itemsLoaded,
 		searchTerm,
 		itemGroup,
+		lastItemCatalogSyncTime,
 		posProfile,
 		customer,
 		customerPriceList,
@@ -298,6 +317,8 @@ export function useItemsIntegration(options: IntegrationOptions = {}) {
 		filterByGroup: itemsStore.filterByGroup,
 		updatePriceList: itemsStore.updatePriceList,
 		refreshItems: itemsStore.refreshItems,
+		recoverItemCatalog,
+		recoverItemCatalogIfUnhealthy,
 		appendCachedItemsPage: itemsStore.appendCachedItemsPage,
 		resetCachedItemsForGroup: itemsStore.resetCachedItemsForGroup,
 		backgroundSyncItems: itemsStore.backgroundSyncItems,

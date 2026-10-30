@@ -1,4 +1,5 @@
 import { useItemsStore } from "../../../stores/itemsStore.js";
+import { resolvePricingRuleName } from "./pricing_rule_names";
 
 declare const __: (_text: string, _args?: any[]) => string;
 
@@ -44,70 +45,19 @@ export function _syncAutoFreeLines(context: any, freebiesMap: Map<string, any> =
 	const existing = new Map();
 	const legacyFreeLines: any[] = [];
 
-	const resolveRuleName = (line) => {
-		if (!line) {
+	const baseFreeKey = (key) => {
+		if (!key || typeof key !== "string") {
 			return "";
 		}
-
-		const preferString = (value) => {
-			if (!value) {
-				return "";
-			}
-			if (typeof value === "string") {
-				return value;
-			}
-			if (Array.isArray(value)) {
-				for (const entry of value) {
-					const resolved = preferString(entry);
-					if (resolved) {
-						return resolved;
-					}
-				}
-				return "";
-			}
-			if (typeof value === "object") {
-				return value.name || value.rule || value.pricing_rule || value.pricingRule || "";
-			}
-			return "";
-		};
-
-		if (line.source_rule) {
-			return String(line.source_rule);
-		}
-
-		if (line.pricing_rule) {
-			return preferString(line.pricing_rule);
-		}
-
-		const raw = line.pricing_rules;
-		if (typeof raw === "string") {
-			const trimmed = raw.trim();
-			if (!trimmed) {
-				return "";
-			}
-			if (
-				(trimmed.startsWith("[") && trimmed.endsWith("]")) ||
-				(trimmed.startsWith("{") && trimmed.endsWith("}"))
-			) {
-				try {
-					const parsed = JSON.parse(trimmed);
-					return preferString(parsed);
-				} catch (error) {
-					console.warn("Failed to parse pricing_rules JSON", error);
-					return trimmed;
-				}
-			}
-			return trimmed;
-		}
-
-		return preferString(raw);
+		const segments = key.split("::");
+		return segments.length >= 2 ? `${segments[0]}::${segments[1]}` : key;
 	};
 
 	context.items.forEach((line, index) => {
 		if (line && line.auto_free_source) {
 			existing.set(line.auto_free_source, { line, index });
 		} else if (line && line.is_free_item) {
-			const ruleName = resolveRuleName(line);
+			const ruleName = resolvePricingRuleName(line);
 			if (ruleName) {
 				legacyFreeLines.push({
 					line,
@@ -292,9 +242,27 @@ export function _syncAutoFreeLines(context: any, freebiesMap: Map<string, any> =
 		line.pricing_rule_badge = buildFreeBadgeMeta(data);
 	};
 
+	const consumedExistingLines = new Set<any>();
+
 	for (const [key, data] of freebiesMap.entries()) {
-		const match = existing.get(key);
+		let match = existing.get(key);
+		if (match && consumedExistingLines.has(match.line)) {
+			match = null;
+		}
+		if (!match) {
+			const expectedBaseKey = baseFreeKey(key);
+			for (const [existingKey, candidate] of existing.entries()) {
+				if (!consumedExistingLines.has(candidate.line) && baseFreeKey(existingKey) === expectedBaseKey) {
+					match = candidate;
+					existing.delete(existingKey);
+					candidate.line.auto_free_source = key;
+					existing.set(key, candidate);
+					break;
+				}
+			}
+		}
 		if (match) {
+			consumedExistingLines.add(match.line);
 			applyFreeLineState(match.line, data);
 			continue;
 		}
@@ -315,6 +283,7 @@ export function _syncAutoFreeLines(context: any, freebiesMap: Map<string, any> =
 			legacyEntry.line.parent_row_id = data.parentRowId;
 			applyFreeLineState(legacyEntry.line, data);
 			existing.set(key, { line: legacyEntry.line, index: legacyEntry.index });
+			consumedExistingLines.add(legacyEntry.line);
 			continue;
 		}
 

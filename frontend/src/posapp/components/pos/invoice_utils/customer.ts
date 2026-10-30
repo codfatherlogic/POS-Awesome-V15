@@ -1,7 +1,17 @@
 import {
 	getStoredCustomer,
 	getCachedPriceListItems,
+	setCustomerStorage,
+	saveStoredValueSnapshot,
 } from "../../../../offline/index";
+import {
+	fromCompanyCurrency,
+	getCompanyCurrency,
+	getConversionRate,
+	getPlcConversionRate,
+	getPriceListCurrency,
+	getSelectedCurrency,
+} from "../../../utils/erpnextCurrency";
 
 declare const frappe: any;
 
@@ -26,7 +36,14 @@ export async function fetch_customer_details(context: any) {
 
 		const r = await frappe.call({
 			method: "posawesome.posawesome.api.customers.get_customer_info",
-			args: { customer },
+			args: {
+				customer,
+				company:
+					context?.pos_profile?.company ||
+					context?.company?.name ||
+					context?.company ||
+					null,
+			},
 		});
 
 		if (
@@ -35,6 +52,22 @@ export async function fetch_customer_details(context: any) {
 			context.customer.trim() === requestedCustomer
 		) {
 			context.customer_info = r.message;
+			await setCustomerStorage([r.message]);
+			if (context?.pos_profile?.company) {
+				const totalCredit = Number(r.message?.stored_value_balance || 0);
+				saveStoredValueSnapshot(
+					customer,
+					context.pos_profile.company,
+					totalCredit > 0 ? [
+						{
+							type: "Snapshot",
+							credit_origin: "offline-customer-cache",
+							total_credit: totalCredit,
+							source_type: "Stored Value Snapshot",
+						},
+					] : [],
+				);
+			}
 			const resolvedPriceList =
 				context.customer_info.customer_price_list ||
 				context.customer_info.customer_group_price_list ||
@@ -157,27 +190,26 @@ export function _computePriceConversion(
 	priceCurrency: string,
 ) {
 	const companyCurrency =
-		(context.company && context.company.default_currency) ||
-		context.pos_profile.currency;
-	const selectedCurrency = context.selected_currency || companyCurrency;
-	const priceListCurrency = context.price_list_currency || companyCurrency;
+		getCompanyCurrency(context) || context.pos_profile.currency;
+	const selectedCurrency = getSelectedCurrency(context) || companyCurrency;
+	const priceListCurrency = getPriceListCurrency(context) || companyCurrency;
 
 	let sourceToCompanyRate = 1;
 	if (priceCurrency === companyCurrency) {
 		sourceToCompanyRate = 1;
 	} else if (priceCurrency === selectedCurrency) {
-		sourceToCompanyRate = context.conversion_rate || 1;
+		sourceToCompanyRate = getConversionRate(context);
 	} else if (priceCurrency === priceListCurrency) {
 		sourceToCompanyRate = context._getPlcConversionRate
 			? context._getPlcConversionRate()
-			: 1;
+			: getPlcConversionRate(context);
 	}
 
 	const base_price_list_rate = rate * sourceToCompanyRate;
 	const price_list_rate =
 		selectedCurrency === companyCurrency
 			? base_price_list_rate
-			: base_price_list_rate / (context.conversion_rate || 1);
+			: fromCompanyCurrency(context, base_price_list_rate);
 
 	return {
 		price_list_rate,

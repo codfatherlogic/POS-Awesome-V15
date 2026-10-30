@@ -4,7 +4,9 @@ const { bulkPut, put, toArray, anyOf } = vi.hoisted(() => {
 	const bulkPut = vi.fn();
 	const put = vi.fn();
 	const toArray = vi.fn();
-	const anyOf = vi.fn(() => ({ toArray }));
+	const anyOf = vi.fn(() => ({
+		filter: vi.fn(() => ({ toArray })),
+	}));
 	return { bulkPut, put, toArray, anyOf };
 });
 
@@ -25,9 +27,9 @@ vi.mock("../src/offline/db", () => {
 			isOpen: vi.fn(() => true),
 			open: vi.fn().mockResolvedValue(undefined),
 			table: vi.fn((name: string) => {
-		if (name === "items") {
-			return itemsTable;
-		}
+				if (name === "items") {
+					return itemsTable;
+				}
 				return {
 					get: vi.fn(),
 					put: vi.fn(),
@@ -73,8 +75,13 @@ describe("offline cache item persistence", () => {
 				item_name: "Test Item",
 				actual_qty: 7,
 				profile_scope: "POS-A_WH-A",
+				item_code_lc: "item-1",
+				item_name_lc: "test item",
 				barcodes: ["12345"],
-				name_keywords: ["test", "item"],
+				barcodes_lc: ["12345"],
+				name_keywords: ["test", "item", "products"],
+				name_keywords_lc: ["test", "item", "products"],
+				search_text: "item-1 test item 12345 test item products",
 			}),
 		]);
 	});
@@ -97,8 +104,13 @@ describe("offline cache item persistence", () => {
 			expect.objectContaining({
 				item_code: "ITEM-2",
 				profile_scope: "POS-B_WH-B",
+				item_code_lc: "item-2",
+				item_name_lc: "barcode item",
 				barcodes: ["98765"],
+				barcodes_lc: ["98765"],
 				name_keywords: ["barcode", "item"],
+				name_keywords_lc: ["barcode", "item"],
+				search_text: "item-2 barcode item 98765 barcode item",
 			}),
 		]);
 	});
@@ -123,6 +135,8 @@ describe("offline cache item persistence", () => {
 			expect.objectContaining({
 				item_code: "ITEM-3",
 				name_keywords: ["fallback", "item"],
+				name_keywords_lc: ["fallback", "item"],
+				item_code_lc: "item-3",
 			}),
 		);
 	});

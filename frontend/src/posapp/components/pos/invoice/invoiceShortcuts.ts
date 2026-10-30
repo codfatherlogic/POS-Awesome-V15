@@ -1,3 +1,5 @@
+import { resolveReturnDefaultAmount } from "../../../utils/paymentInitialization";
+
 const isAltOnly = (event: KeyboardEvent) =>
 	event.altKey && !event.ctrlKey && !event.metaKey;
 const consumeEvent = (event: KeyboardEvent) => {
@@ -11,6 +13,16 @@ const isDigit = (event: KeyboardEvent, digit: number) =>
 	event.code === `Numpad${digit}`;
 const isBackquote = (event: KeyboardEvent) =>
 	event.key === "`" || event.code === "Backquote";
+const isArrowRight = (event: KeyboardEvent) =>
+	event.key === "ArrowRight" || event.code === "ArrowRight";
+const isArrowKey = (event: KeyboardEvent) =>
+	["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key);
+const isMacPlatform = () => {
+	const nav = typeof navigator !== "undefined" ? navigator : undefined;
+	return /Mac|iPhone|iPad|iPod/i.test(
+		`${nav?.platform || ""} ${nav?.userAgent || ""}`,
+	);
+};
 const isLetter = (event: KeyboardEvent, letter: string) => {
 	const normalized = letter.toLowerCase();
 	const keyValue = event.key?.toLowerCase?.();
@@ -18,8 +30,90 @@ const isLetter = (event: KeyboardEvent, letter: string) => {
 		keyValue === normalized || event.code === `Key${letter.toUpperCase()}`
 	);
 };
+const isTextEditingTarget = (target: EventTarget | null) => {
+	const element = target as HTMLElement | null;
+	if (!element) {
+		return false;
+	}
+	const tagName = element.tagName?.toLowerCase?.();
+	return (
+		element.isContentEditable ||
+		tagName === "input" ||
+		tagName === "textarea" ||
+		tagName === "select" ||
+		["textbox", "searchbox", "spinbutton", "combobox"].includes(
+			String(element.getAttribute("role") || "").toLowerCase(),
+		)
+	);
+};
+const isArrowEntrySearchTarget = (target: EventTarget | null) => {
+	const element = target as HTMLElement | null;
+	return Boolean(element?.closest?.("[data-pos-arrow-enters-invoice-grid]"));
+};
+const isItemSearchTarget = (target: EventTarget | null) => {
+	const element = target as HTMLElement | null;
+	return Boolean(
+		element?.closest?.(
+			"[data-pos-keyboard-target='item-search'], [data-testid='pos-item-search'], .search-field-shell",
+		),
+	);
+};
+const isElementVisible = (element: HTMLElement) => {
+	if (typeof window === "undefined") {
+		return false;
+	}
+	const style = window.getComputedStyle(element);
+	const rect = element.getBoundingClientRect();
+	return (
+		style.display !== "none" &&
+		style.visibility !== "hidden" &&
+		rect.width > 0 &&
+		rect.height > 0
+	);
+};
+const hasVisibleOverlay = () => {
+	if (typeof document === "undefined") {
+		return false;
+	}
+	return Array.from(
+		document.querySelectorAll<HTMLElement>(".v-overlay__content"),
+	).some(isElementVisible);
+};
+const shouldEnterInvoiceGridFromArrow = (event: KeyboardEvent) => {
+	if (
+		!isArrowKey(event) ||
+		event.altKey ||
+		event.ctrlKey ||
+		event.metaKey ||
+		hasVisibleOverlay()
+	) {
+		return false;
+	}
+	const target = event.target as HTMLElement | null;
+	if (target?.closest?.(".posa-items-table-container, .v-overlay__content")) {
+		return false;
+	}
+	if (isItemSearchTarget(target)) {
+		return false;
+	}
+	return !isTextEditingTarget(target) || isArrowEntrySearchTarget(target);
+};
+const invoiceGridEntryOptionsFromArrow = (key: string, count: number) => {
+	const rowIndex = key === "ArrowDown" ? 0 : Math.max(0, count - 1);
+	if (key === "ArrowLeft" || key === "ArrowRight") {
+		return {
+			rowIndex,
+			mode: "cell" as const,
+			cellEdge:
+				key === "ArrowLeft" ? ("last" as const) : ("first" as const),
+		};
+	}
+	return { rowIndex, mode: "row" as const };
+};
 const showCompactPanel = (
-	eventBus: { emit: (_event: string, _payload?: unknown) => void } | undefined,
+	eventBus:
+		| { emit: (_event: string, _payload?: unknown) => void }
+		| undefined,
 	panel: "selector" | "invoice",
 ) => {
 	eventBus?.emit?.("set_compact_panel", panel);
@@ -60,12 +154,29 @@ interface InvoiceShortcutsVm {
 		};
 		itemsTableRef?: {
 			focusItemField?: (_index: number, _field: ShortcutField) => void;
+			enterKeyboardGrid?: (_options?: {
+				rowIndex?: number;
+				mode?: "row" | "cell";
+				cellEdge?: "first" | "last";
+			}) => boolean;
 		};
 		itemsTable?: {
 			focusItemField?: (_index: number, _field: ShortcutField) => void;
+			enterKeyboardGrid?: (_options?: {
+				rowIndex?: number;
+				mode?: "row" | "cell";
+				cellEdge?: "first" | "last";
+			}) => boolean;
 		};
 	};
 	items?: Array<Record<string, unknown>>;
+	invoice_doc?: {
+		rounded_total?: number;
+		grand_total?: number;
+		is_return?: number | boolean;
+		posa_refundable_amount?: number;
+	};
+	subtotal?: number;
 	paymentVisible?: boolean;
 	shortcutSubmitInFlight?: boolean;
 	cancel_dialog?: boolean;
@@ -90,8 +201,27 @@ interface InvoiceShortcutsVm {
 	remove_item?: (_item: Record<string, unknown>) => void;
 	get_draft_invoices?: () => void;
 	save_and_clear_invoice?: () => void;
-	confirmPaymentSubmission: () => Promise<boolean>;
+	openItemWorkspace?: () => void;
+	openItemQuickEdit?: () => void;
+	focusItemSearchField?: () => void;
+	isCounterGridPresentation?: boolean;
+	get_invoice_doc?: () => {
+		rounded_total?: number;
+		grand_total?: number;
+		is_return?: number | boolean;
+		posa_refundable_amount?: number;
+	};
+	confirmPaymentSubmission: (
+		_initialAmount?: number,
+	) => Promise<number | null>;
+	getShortcutPaymentAmount: () => number;
 	focusItemTableField: (_field: ShortcutField) => void;
+	enterInvoiceItemsGrid: (_options?: {
+		rowIndex?: number;
+		mode?: "row" | "cell";
+		cellEdge?: "first" | "last";
+	}) => void;
+	enterInvoiceItemsGridFromArrow?: (_key?: string) => void;
 }
 
 const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
@@ -103,12 +233,34 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			const key = event.key;
 
+			if (shouldEnterInvoiceGridFromArrow(event)) {
+				const count = this.items?.length || 0;
+				if (!count) {
+					return;
+				}
+				consumeEvent(event);
+				showCompactPanel(this.eventBus, "invoice");
+				this.enterInvoiceItemsGrid(
+					invoiceGridEntryOptionsFromArrow(key, count),
+				);
+				return;
+			}
+
+			if (key === "F2") {
+				consumeEvent(event);
+				this.focusItemSearchField?.();
+				return;
+			}
+
+			if (key === "F12") {
+				consumeEvent(event);
+				(this.openItemWorkspace || this.openItemQuickEdit)?.call(this);
+				return;
+			}
+
 			if (key === "F4") {
 				consumeEvent(event);
-				this.toastStore.show({
-					title: __("Profile switching is not available yet"),
-					color: "warning",
-				});
+				this.eventBus.emit("open_employee_switch");
 				return;
 			}
 
@@ -127,14 +279,24 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			if (key === "F8") {
 				consumeEvent(event);
-				this.toastStore.show({
-					title: __("POS lock is not available yet"),
-					color: "warning",
-				});
+				this.eventBus.emit("lock_pos_screen");
+				return;
+			}
+
+			if (key === "F9") {
+				consumeEvent(event);
+				this.show_payment?.();
 				return;
 			}
 
 			if (!isAltOnly(event)) {
+				return;
+			}
+
+			if (isArrowRight(event)) {
+				consumeEvent(event);
+				showCompactPanel(this.eventBus, "invoice");
+				this.enterInvoiceItemsGrid();
 				return;
 			}
 
@@ -157,6 +319,10 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			if (isDigit(event, 3)) {
 				consumeEvent(event);
+				if (this.isCounterGridPresentation) {
+					this.focusItemSearchField?.();
+					return;
+				}
 				showCompactPanel(this.eventBus, "selector");
 				this.uiStore.setActiveView("items");
 				this.uiStore.triggerItemSearchFocus();
@@ -189,6 +355,12 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 			if (isDigit(event, 7)) {
 				consumeEvent(event);
+				if (isMacPlatform()) {
+					(this.openItemWorkspace || this.openItemQuickEdit)?.call(
+						this,
+					);
+					return;
+				}
 				this.get_draft_orders?.();
 				return;
 			}
@@ -224,6 +396,12 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 				consumeEvent(event);
 				frappe.set_route("/");
 				location.reload();
+				return;
+			}
+
+			if (this.isCounterGridPresentation && isLetter(event, "g")) {
+				consumeEvent(event);
+				this.eventBus.emit("open_cart_alternates");
 				return;
 			}
 
@@ -322,8 +500,10 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 
 				try {
 					const shouldPrint = isPrintShortcut;
-					const shouldSubmit = await this.confirmPaymentSubmission();
-					if (!shouldSubmit) {
+					const paymentAmount = await this.confirmPaymentSubmission(
+						this.getShortcutPaymentAmount(),
+					);
+					if (paymentAmount === null) {
 						return;
 					}
 					await this.flushBackgroundUpdates?.();
@@ -333,11 +513,30 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 					await this.show_payment?.();
 					this.eventBus.emit("queue_submit_payment_shortcut", {
 						print: shouldPrint,
+						amount: paymentAmount,
 					});
 				} finally {
 					this.shortcutSubmitInFlight = false;
 				}
 			}
+		},
+
+		getShortcutPaymentAmount() {
+			const currentDoc = this.get_invoice_doc?.() || this.invoice_doc;
+			const doc = currentDoc
+				? {
+						...currentDoc,
+						posa_refundable_amount:
+							this.invoice_doc?.posa_refundable_amount ??
+							currentDoc.posa_refundable_amount,
+					}
+				: undefined;
+			const amount = Number(
+				doc?.rounded_total ?? doc?.grand_total ?? this.subtotal ?? 0,
+			);
+			return Number.isFinite(amount)
+				? Math.abs(resolveReturnDefaultAmount(doc, amount))
+				: 0;
 		},
 
 		focusItemTableField(field: ShortcutField) {
@@ -359,6 +558,35 @@ const invoiceShortcuts: Record<string, unknown> & ThisType<InvoiceShortcutsVm> =
 			this.shortcutCycle[field] = (index + 1) % count;
 			this.$refs.itemsTableRef?.focusItemField?.(index, field) ||
 				this.$refs.itemsTable?.focusItemField?.(index, field);
+		},
+
+		enterInvoiceItemsGrid(options?: {
+			rowIndex?: number;
+			mode?: "row" | "cell";
+			cellEdge?: "first" | "last";
+		}) {
+			const count = this.items?.length || 0;
+			if (!count) {
+				return;
+			}
+
+			const resolvedOptions = options || {
+				rowIndex: count - 1,
+				mode: "row" as const,
+			};
+			this.$refs.itemsTableRef?.enterKeyboardGrid?.(resolvedOptions) ||
+				this.$refs.itemsTable?.enterKeyboardGrid?.(resolvedOptions);
+		},
+
+		enterInvoiceItemsGridFromArrow(key?: string) {
+			const count = this.items?.length || 0;
+			if (!count) {
+				return;
+			}
+
+			this.enterInvoiceItemsGrid(
+				invoiceGridEntryOptionsFromArrow(key || "ArrowUp", count),
+			);
 		},
 	};
 

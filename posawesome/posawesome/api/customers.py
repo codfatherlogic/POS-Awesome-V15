@@ -11,7 +11,140 @@ from erpnext.accounts.doctype.loyalty_program.loyalty_program import (
     get_loyalty_program_details_with_points,
 )
 from frappe.utils.caching import redis_cache
-from .utils import fetch_sales_person_names
+from .utils import assert_pos_profile_write_allowed, fetch_sales_person_names
+from .stored_value import get_stored_value_summary
+
+
+def _load_json_arg(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _assert_customer_write_allowed(pos_profile_doc=None, company=None):
+    return assert_pos_profile_write_allowed(pos_profile_doc, company=company)
+
+
+def _mobile_search_keys(value):
+    digits = "".join(character for character in cstr(value or "") if character.isdigit())
+    if not digits:
+        return []
+    keys = {digits}
+    if digits.startswith("00") and len(digits) > 2:
+        keys.add(digits[2:])
+    if digits.startswith("0") and len(digits) > 1:
+        keys.add(digits[1:])
+    for tail_length in (10, 9, 8):
+        if len(digits) > tail_length:
+            keys.add(digits[-tail_length:])
+    return [key for key in keys if len(key) >= 4]
+
+
+def _mobile_matches_search(mobile_no, search_term):
+    customer_keys = _mobile_search_keys(mobile_no)
+    search_keys = _mobile_search_keys(search_term)
+    return any(
+        search_key in customer_key or customer_key in search_key
+        for search_key in search_keys
+        for customer_key in customer_keys
+    )
+
+
+def _normalize_tax_id(value):
+    return "".join(
+        character.lower()
+        for character in cstr(value or "")
+        if character.isalnum()
+    )
+
+
+def _customer_matches_search(customer, search_term):
+    normalized_term = cstr(search_term or "").strip().lower()
+    if not normalized_term:
+        return True
+
+    search_parts = [part for part in normalized_term.split() if part]
+    search_text = "\n".join(
+        cstr(value or "").lower()
+        for value in (
+            customer.get("customer_name"),
+            customer.get("name"),
+            customer.get("mobile_no"),
+            customer.get("email_id"),
+            customer.get("tax_id"),
+            "".join(
+                character
+                for character in cstr(customer.get("mobile_no") or "")
+                if character.isdigit()
+            ),
+            _normalize_tax_id(customer.get("tax_id")),
+        )
+    )
+    text_match = all(part in search_text for part in search_parts)
+    return text_match or _mobile_matches_search(customer.get("mobile_no"), search_term)
+
+
+def _find_duplicate_customer_records(
+    customer_name=None,
+    mobile_no=None,
+    email_id=None,
+    tax_id=None,
+    exclude_customer=None,
+    allow_duplicate_names=False,
+):
+    """Return exact duplicate candidates without loading the full customer table."""
+    checks = []
+    if customer_name and not allow_duplicate_names:
+        checks.append(("customer_name", str(customer_name).strip()))
+    if mobile_no:
+        checks.append(("mobile_no", str(mobile_no).strip()))
+    if email_id:
+        checks.append(("email_id", str(email_id).strip().lower()))
+    if tax_id:
+        checks.append(("tax_id", str(tax_id).strip()))
+
+    matches = {}
+    for fieldname, value in checks:
+        if not value:
+            continue
+        filters = {fieldname: value, "disabled": 0}
+        if exclude_customer:
+            filters["name"] = ["!=", exclude_customer]
+        for customer in frappe.get_all(
+            "Customer",
+            filters=filters,
+            fields=["name", "customer_name", "mobile_no", "email_id", "tax_id"],
+            limit_page_length=5,
+        ):
+            customer_name_key = customer.get("name")
+            if not customer_name_key:
+                continue
+            match = matches.setdefault(customer_name_key, dict(customer, matching_fields=[]))
+            match["matching_fields"].append(fieldname)
+
+    return list(matches.values())
+
+
+@frappe.whitelist()
+def find_duplicate_customers(
+    customer_name,
+    company,
+    pos_profile_doc,
+    mobile_no=None,
+    email_id=None,
+    tax_id=None,
+    customer_id=None,
+):
+    pos_profile_doc_obj = _assert_customer_write_allowed(pos_profile_doc, company=company)
+    pos_profile = pos_profile_doc_obj.as_dict() if pos_profile_doc_obj else {}
+    return _find_duplicate_customer_records(
+        customer_name=customer_name,
+        mobile_no=mobile_no,
+        email_id=email_id,
+        tax_id=tax_id,
+        exclude_customer=customer_id,
+        allow_duplicate_names=bool(pos_profile.get("posa_allow_duplicate_customer_names")),
+    )
 
 
 def get_customer_groups(pos_profile):
@@ -22,9 +155,7 @@ def get_customer_groups(pos_profile):
             group_name = data.get("customer_group") if data else None
             if not group_name:
                 continue
-            customer_groups.extend(
-                [d.get("name") for d in get_child_nodes("Customer Group", group_name)]
-            )
+            customer_groups.extend([d.get("name") for d in get_child_nodes("Customer Group", group_name)])
 
     return list(set(customer_groups))
 
@@ -55,31 +186,43 @@ def get_customer_group_condition(pos_profile):
 
 
 @frappe.whitelist()
-def get_customer_balance(customer):
+def get_customer_balance(customer, company=None):
     if not customer:
-        return {"balance": 0, "customer_name": None}
+        return {"balance": None, "customer_name": None, "currency": None}
+
+    if not company:
+        if frappe.db.exists("DocType", "POS Session"):
+            pos_session = frappe.db.get_value(
+                "POS Session",
+                {"user": frappe.session.user, "status": "Open"},
+                "pos_profile",
+            )
+            if pos_session:
+                company = frappe.db.get_value("POS Profile", pos_session, "company")
+        if not company:
+            company = frappe.defaults.get_user_default("Company") or frappe.db.get_default("Company")
+
+    from erpnext.accounts.party import get_dashboard_info
 
     try:
-        customer_doc = frappe.get_doc("Customer", customer)
-        customer_name = customer_doc.customer_name
+        customer_name = frappe.db.get_value("Customer", customer, "customer_name")
 
-        balance = frappe.db.sql(
-            """
-            SELECT SUM(debit - credit) AS balance
-            FROM `tabGL Entry`
-            WHERE party_type = 'Customer' AND party = %s AND docstatus = 1
-        """,
-            (customer,),
-            as_dict=True,
-        )
+        dashboard_info = get_dashboard_info("Customer", customer)
+        company_data = [d for d in (dashboard_info or []) if d.get("company") == company]
+
+        if company_data and company_data[0].get("total_unpaid") is not None:
+            balance = flt(company_data[0]["total_unpaid"])
+        else:
+            balance = None
 
         return {
-            "balance": flt(balance[0].get("balance", 0)) if balance else 0,
-            "customer_name": customer_name,
+            "balance": balance,
+            "customer_name": customer_name if dashboard_info is not None else None,
+            "currency": company_data[0].get("currency") if company_data else None,
         }
     except Exception as e:
-        frappe.log_error(f"Error fetching customer balance: {e}")
-        return {"balance": 0, "customer_name": None}
+        frappe.log_error(frappe.get_traceback(), _("Error fetching customer balance"))
+        return {"balance": None, "customer_name": None, "currency": None}
 
 
 @frappe.whitelist()
@@ -116,10 +259,15 @@ def get_customer_names(pos_profile, limit=None, offset=None, start_after=None, m
             filters=filters,
             fields=[
                 "name",
+                "modified",
                 "mobile_no",
                 "email_id",
                 "tax_id",
                 "customer_name",
+                "loyalty_program",
+                "default_price_list",
+                "customer_group",
+                "territory",
                 "primary_address",
             ],
             order_by="name",
@@ -135,6 +283,63 @@ def get_customer_names(pos_profile, limit=None, offset=None, start_after=None, m
 
 
 @frappe.whitelist()
+def search_customers(pos_profile, search_term, limit=200):
+    """Search profile-eligible customers across their POS-facing identifiers."""
+    profile = _load_json_arg(pos_profile) or {}
+    search_term = cstr(search_term or "").strip()
+    if not search_term:
+        return []
+
+    try:
+        result_limit = max(1, min(int(limit or 200), 200))
+    except (TypeError, ValueError):
+        result_limit = 200
+
+    search_keys = _mobile_search_keys(search_term)
+    mobile_fragment = max(search_keys, key=len)[-4:] if search_keys else search_term
+    normalized_tax_id = _normalize_tax_id(search_term)
+    tax_fragment = normalized_tax_id[-4:] if normalized_tax_id else search_term
+    filters = {"disabled": 0}
+    customer_groups = get_customer_groups(profile)
+    if customer_groups:
+        filters["customer_group"] = ["in", customer_groups]
+
+    or_filters = [
+        ["name", "like", f"%{search_term}%"],
+        ["customer_name", "like", f"%{search_term}%"],
+        ["email_id", "like", f"%{search_term}%"],
+        ["mobile_no", "like", f"%{mobile_fragment}%"],
+        ["tax_id", "like", f"%{tax_fragment}%"],
+    ]
+
+    candidates = frappe.get_all(
+        "Customer",
+        filters=filters,
+        or_filters=or_filters,
+        fields=[
+            "name",
+            "modified",
+            "mobile_no",
+            "email_id",
+            "tax_id",
+            "customer_name",
+            "loyalty_program",
+            "default_price_list",
+            "customer_group",
+            "territory",
+            "primary_address",
+        ],
+        order_by="name",
+        limit_page_length=max(result_limit * 5, 500),
+    )
+    return [
+        customer
+        for customer in candidates
+        if _customer_matches_search(customer, search_term)
+    ][:result_limit]
+
+
+@frappe.whitelist()
 def get_customers_count(pos_profile):
     pos_profile = json.loads(pos_profile)
     filters = {"disabled": 0}
@@ -145,7 +350,7 @@ def get_customers_count(pos_profile):
 
 
 @frappe.whitelist()
-def get_customer_info(customer=None):
+def get_customer_info(customer=None, company=None):
     customer = cstr(customer or "").strip()
     if not customer:
         return {}
@@ -172,14 +377,9 @@ def get_customer_info(customer=None):
         "Customer Group", customer.customer_group, "default_price_list"
     )
 
-    effective_price_list = (
-        res.get("customer_price_list")
-        or res.get("customer_group_price_list")
-    )
+    effective_price_list = res.get("customer_price_list") or res.get("customer_group_price_list")
     if effective_price_list:
-        res["price_list_currency"] = frappe.get_value(
-            "Price List", effective_price_list, "currency"
-        )
+        res["price_list_currency"] = frappe.get_value("Price List", effective_price_list, "currency")
     else:
         res["price_list_currency"] = None
 
@@ -192,6 +392,15 @@ def get_customer_info(customer=None):
         )
         res["loyalty_points"] = lp_details.get("loyalty_points")
         res["conversion_factor"] = lp_details.get("conversion_factor")
+
+    company = cstr(company or "").strip()
+    if company:
+        stored_value = get_stored_value_summary(customer=customer.name, company=company)
+        res["stored_value_balance"] = stored_value.get("available_amount", 0)
+        res["stored_value_sources"] = stored_value.get("source_count", 0)
+    else:
+        res["stored_value_balance"] = 0
+        res["stored_value_sources"] = 0
 
     addresses = frappe.db.sql(
         """
@@ -249,7 +458,8 @@ def create_customer(
     city=None,
     country=None,
 ):
-    pos_profile = json.loads(pos_profile_doc)
+    pos_profile_doc_obj = _assert_customer_write_allowed(pos_profile_doc, company=company)
+    pos_profile = pos_profile_doc_obj.as_dict() if pos_profile_doc_obj else {}
 
     # Format birthday to MySQL compatible format (YYYY-MM-DD) if provided
     formatted_birthday = None
@@ -268,8 +478,21 @@ def create_customer(
             frappe.log_error(f"Error formatting birthday: {birthday}", "POS Awesome")
 
     if method == "create":
-        is_exist = frappe.db.exists("Customer", {"customer_name": customer_name})
-        if pos_profile.get("posa_allow_duplicate_customer_names") or not is_exist:
+        duplicate_customers = _find_duplicate_customer_records(
+            customer_name=customer_name,
+            mobile_no=mobile_no,
+            email_id=email_id,
+            tax_id=tax_id,
+            allow_duplicate_names=bool(pos_profile.get("posa_allow_duplicate_customer_names")),
+        )
+        if duplicate_customers:
+            existing = duplicate_customers[0]
+            frappe.throw(
+                _("Customer already exists: {0}").format(
+                    existing.get("customer_name") or existing.get("name")
+                )
+            )
+        else:
             customer = frappe.get_doc(
                 {
                     "doctype": "Customer",
@@ -306,13 +529,12 @@ def create_customer(
                     "state": "",
                     "pincode": "",
                     "country": country or "",
+                    "company": company,
+                    "pos_profile_doc": pos_profile_doc,
                 }
                 make_address(json.dumps(args))
 
             return customer
-        else:
-            frappe.throw(_("Customer already exists"))
-
     elif method == "update":
         customer_doc = frappe.get_doc("Customer", customer_id)
         customer_doc.customer_name = customer_name
@@ -327,9 +549,21 @@ def create_customer(
 
         # ensure contact details are synced correctly
         if mobile_no:
-            set_customer_info(customer_doc.name, "mobile_no", mobile_no)
+            set_customer_info(
+                customer_doc.name,
+                "mobile_no",
+                mobile_no,
+                pos_profile_doc=pos_profile_doc,
+                company=company,
+            )
         if email_id:
-            set_customer_info(customer_doc.name, "email_id", email_id)
+            set_customer_info(
+                customer_doc.name,
+                "email_id",
+                email_id,
+                pos_profile_doc=pos_profile_doc,
+                company=company,
+            )
 
         existing_address_name = frappe.db.get_value(
             "Dynamic Link",
@@ -359,6 +593,8 @@ def create_customer(
                     "state": "",
                     "pincode": "",
                     "country": country or "",
+                    "company": company,
+                    "pos_profile_doc": pos_profile_doc,
                 }
                 make_address(json.dumps(args))
 
@@ -366,7 +602,9 @@ def create_customer(
 
 
 @frappe.whitelist()
-def set_customer_info(customer, fieldname, value=""):
+def set_customer_info(customer, fieldname, value="", pos_profile_doc=None, company=None):
+    _assert_customer_write_allowed(pos_profile_doc, company=company)
+
     if fieldname == "loyalty_program":
         frappe.db.set_value("Customer", customer, "loyalty_program", value)
 
@@ -428,7 +666,9 @@ def get_customer_addresses(customer):
 
 @frappe.whitelist()
 def make_address(args):
-    args = json.loads(args)
+    args = _load_json_arg(args)
+    _assert_customer_write_allowed(args.get("pos_profile_doc"), company=args.get("company"))
+
     address = frappe.get_doc(
         {
             "doctype": "Address",

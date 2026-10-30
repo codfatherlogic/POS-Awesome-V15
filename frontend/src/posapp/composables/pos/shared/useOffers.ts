@@ -1,6 +1,11 @@
 import { ref } from "vue";
 import { useUIStore } from "../../../stores/uiStore.js";
-import { getCachedOffers, saveOffers } from "../../../../offline/index";
+import {
+	getCachedOffers,
+	isOffline,
+	memoryInitPromise,
+	saveOffers,
+} from "../../../../offline/index";
 
 declare const frappe: any;
 
@@ -18,13 +23,19 @@ export function useOffers() {
 			return offer;
 		});
 
-	function get_offers(profileName: string, posProfile: any) {
-		if (posProfile && posProfile.posa_local_storage) {
+	async function get_offers(profileName: string, posProfile: any) {
+		// IndexedDB hydrates the synchronous cache facade asynchronously. Waiting
+		// here is essential on a hard refresh made while the terminal is offline.
+		await memoryInitPromise;
+		if ((posProfile && posProfile.posa_local_storage) || isOffline()) {
 			const cached = normalizeOffers(getCachedOffers());
 			if (cached.length) {
 				offers.value = cached;
 				uiStore.setOffers(cached);
 			}
+		}
+		if (isOffline()) {
+			return offers.value;
 		}
 		return frappe
 			.call("posawesome.posawesome.api.offers.get_offers", {

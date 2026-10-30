@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from posawesome.posawesome.doctype.pos_closing_shift.closing_processing import overview
+from posawesome.posawesome.doctype.pos_closing_shift.closing_processing import creation, invoices, overview
 
 
 class DummyClosingShift:
@@ -16,6 +16,34 @@ class DummyClosingShift:
         self.company = company
         self.pos_profile = pos_profile
         self._tables = tables or {}
+
+    def get(self, key, default=None):
+        return self._tables.get(key, default)
+
+
+class AttrDict(dict):
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
+class DummyPaymentEntry:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+class DummyClosingShiftDoc:
+    def __init__(self, pos_payments):
+        self.flags = AttrDict()
+        self._tables = {"pos_payments": pos_payments}
 
     def get(self, key, default=None):
         return self._tables.get(key, default)
@@ -104,3 +132,338 @@ class TestPOSClosingShift(unittest.TestCase):
         overview.get_payment_reconciliation_details(closing_shift_doc)
 
         payment_doc.check_permission.assert_called_once_with("read")
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.frappe")
+    def test_reconciliation_print_uses_original_tender_currency(self, mock_frappe):
+        invoice_doc = self._make_doc(
+            {
+                "currency": "USD",
+                "conversion_rate": 285,
+                "grand_total": 0.42,
+                "net_total": 0.42,
+                "payments": [
+                    AttrDict(
+                        {
+                            "mode_of_payment": "Cash",
+                            "posa_payment_currency": "PKR",
+                            "posa_original_amount": 20,
+                            "amount": 0.07,
+                            "base_amount": 20,
+                        }
+                    ),
+                    AttrDict(
+                        {
+                            "mode_of_payment": "Online Transfer",
+                            "posa_payment_currency": "USD",
+                            "posa_original_amount": 0.35,
+                            "amount": 0.35,
+                            "base_amount": 99.75,
+                        }
+                    ),
+                ],
+                "change_amount": 0,
+            }
+        )
+        closing_shift_doc = DummyClosingShift(
+            tables={
+                "pos_transactions": [{"sales_invoice": "SINV-0001"}],
+                "pos_payments": [],
+                "payment_reconciliation": [
+                    AttrDict(
+                        {
+                            "mode_of_payment": "Cash",
+                            "currency": "PKR",
+                            "opening_amount": 0,
+                            "expected_amount": 20,
+                            "difference": 0,
+                        }
+                    ),
+                    AttrDict(
+                        {
+                            "mode_of_payment": "Online Transfer",
+                            "currency": "USD",
+                            "opening_amount": 0,
+                            "expected_amount": 99.75,
+                            "difference": 0,
+                        }
+                    ),
+                ],
+            },
+            company="My Co",
+        )
+
+        mock_frappe.get_cached_value.return_value = "PKR"
+        mock_frappe.db.get_value.return_value = "Cash"
+        mock_frappe.db.exists.return_value = True
+        mock_frappe.get_cached_doc.return_value = invoice_doc
+        mock_frappe._dict.side_effect = lambda d: AttrDict(d)
+        mock_frappe.render_template.return_value = "<html/>"
+
+        overview.get_payment_reconciliation_details(closing_shift_doc)
+
+        context = mock_frappe.render_template.call_args.args[1]
+        summaries = {
+            (row["mode_of_payment"], row["currency_breakdown"][0]["currency"]): row
+            for row in context["mode_summaries"]
+        }
+        self.assertEqual(summaries[("Cash", "PKR")]["currency_breakdown"][0]["amount"], 20)
+        self.assertEqual(
+            summaries[("Online Transfer", "USD")]["currency_breakdown"][0]["amount"],
+            0.35,
+        )
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.frappe")
+    def test_supplier_payment_reference_does_not_populate_customer_link(self, mock_frappe):
+        mock_frappe._dict.side_effect = lambda value: AttrDict(value)
+        payment_entry = DummyPaymentEntry(
+            name="ACC-PAY-SUP-0001",
+            mode_of_payment="Cash",
+            paid_amount=50,
+            posting_date="2026-05-06",
+            party_type="Supplier",
+            party="Haji Khalid & Sons",
+        )
+
+        row = creation.build_pos_payment_reference(payment_entry)
+
+        self.assertEqual(row.party_type, "Supplier")
+        self.assertEqual(row.party, "Haji Khalid & Sons")
+        self.assertNotIn("customer", row)
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.frappe")
+    def test_customer_payment_reference_keeps_customer_link(self, mock_frappe):
+        mock_frappe._dict.side_effect = lambda value: AttrDict(value)
+        payment_entry = DummyPaymentEntry(
+            name="ACC-PAY-CUS-0001",
+            mode_of_payment="Cash",
+            paid_amount=75,
+            posting_date="2026-05-06",
+            party_type="Customer",
+            party="Walk-in Customer",
+        )
+
+        row = creation.build_pos_payment_reference(payment_entry)
+
+        self.assertEqual(row.party_type, "Customer")
+        self.assertEqual(row.party, "Walk-in Customer")
+        self.assertEqual(row.customer, "Walk-in Customer")
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.creation.frappe")
+    def test_normalize_payment_references_clears_supplier_customer_link(self, mock_frappe):
+        row = AttrDict(
+            {
+                "payment_entry": "ACC-PAY-SUP-0001",
+                "mode_of_payment": "Cash",
+                "customer": "Haji Khalid & Sons",
+            }
+        )
+        closing_shift_doc = DummyClosingShiftDoc([row])
+        mock_frappe.db.get_value.return_value = {
+            "party_type": "Supplier",
+            "party": "Haji Khalid & Sons",
+        }
+        mock_frappe.get_meta.return_value.get_field.return_value = SimpleNamespace(reqd=1)
+
+        creation.normalize_pos_payment_references(closing_shift_doc)
+
+        self.assertEqual(row.party_type, "Supplier")
+        self.assertEqual(row.party, "Haji Khalid & Sons")
+        self.assertIsNone(row.customer)
+        self.assertTrue(closing_shift_doc.flags.ignore_mandatory)
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.invoices.frappe")
+    def test_submit_printed_invoices_skips_return_drafts_against_cancelled_invoices(self, mock_frappe):
+        class DummyInvoiceDoc:
+            def __init__(self, name, is_return=0, return_against=None):
+                self.name = name
+                self._values = {
+                    "is_return": is_return,
+                    "return_against": return_against,
+                }
+                self.submit = Mock()
+
+            def get(self, key, default=None):
+                return self._values.get(key, default)
+
+        cancelled_return = DummyInvoiceDoc(
+            "SINV-RET-0001",
+            is_return=1,
+            return_against="ACC-SINV-2026-00222",
+        )
+        regular_invoice = DummyInvoiceDoc("SINV-0002")
+
+        mock_frappe._dict = lambda d: SimpleNamespace(**d)
+        mock_frappe.get_all.return_value = [
+            SimpleNamespace(name="SINV-RET-0001"),
+            SimpleNamespace(name="SINV-0002"),
+        ]
+        mock_frappe.get_doc.side_effect = lambda doctype, name: {
+            "SINV-RET-0001": cancelled_return,
+            "SINV-0002": regular_invoice,
+        }[name]
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field: (
+            2 if (doctype, name, field) == ("Sales Invoice", "ACC-SINV-2026-00222", "docstatus") else None
+        )
+
+        result = invoices.submit_printed_invoices("POS-OPEN-1", "Sales Invoice")
+
+        cancelled_return.submit.assert_not_called()
+        regular_invoice.submit.assert_called_once_with()
+        mock_frappe.log_error.assert_called_once()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].invoice, "SINV-RET-0001")
+        self.assertEqual(result[0].return_against, "ACC-SINV-2026-00222")
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_payments_entries")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_pos_invoices")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.frappe")
+    def test_overview_does_not_resubmit_printed_invoices(
+        self,
+        mock_frappe,
+        mock_get_pos_invoices,
+        mock_get_payments_entries,
+    ):
+        mock_frappe.get_doc.return_value = SimpleNamespace(
+            doctype="POS Opening Shift",
+            name="POS-OPEN-1",
+            pos_profile="POS-PROFILE-1",
+            company="My Co",
+        )
+        mock_frappe.get_cached_value.return_value = "USD"
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field: (
+            0
+            if (doctype, name, field)
+            == ("POS Profile", "POS-PROFILE-1", "create_pos_invoice_instead_of_sales_invoice")
+            else "Cash"
+        )
+        mock_get_pos_invoices.return_value = []
+        mock_get_payments_entries.return_value = []
+        mock_frappe.get_all.return_value = []
+
+        overview.get_closing_shift_overview("POS-OPEN-1")
+
+        mock_get_pos_invoices.assert_called_once_with(
+            "POS-OPEN-1",
+            "Sales Invoice",
+            submit_printed=0,
+        )
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_payments_entries")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_pos_invoices")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.frappe")
+    def test_overview_reports_loyalty_redemption_without_payment_reconciliation(
+        self,
+        mock_frappe,
+        mock_get_pos_invoices,
+        mock_get_payments_entries,
+    ):
+        mock_frappe.get_doc.return_value = SimpleNamespace(
+            doctype="POS Opening Shift",
+            name="POS-OPEN-1",
+            pos_profile="POS-PROFILE-1",
+            company="My Co",
+        )
+        mock_frappe.get_cached_value.return_value = "USD"
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field: (
+            0
+            if (doctype, name, field)
+            == ("POS Profile", "POS-PROFILE-1", "create_pos_invoice_instead_of_sales_invoice")
+            else "Cash"
+        )
+        mock_get_pos_invoices.return_value = [
+            AttrDict(
+                {
+                    "name": "SINV-0001",
+                    "currency": "USD",
+                    "conversion_rate": 1,
+                    "grand_total": 100,
+                    "rounded_total": 100,
+                    "base_grand_total": 100,
+                    "loyalty_amount": 10,
+                    "loyalty_points": 2,
+                    "payments": [
+                        AttrDict(
+                            {
+                                "mode_of_payment": "Cash",
+                                "amount": 90,
+                                "base_amount": 90,
+                            }
+                        )
+                    ],
+                }
+            )
+        ]
+        mock_get_payments_entries.return_value = []
+        mock_frappe.get_all.return_value = []
+
+        result = overview.get_closing_shift_overview("POS-OPEN-1")
+
+        self.assertEqual(result["loyalty_redemption"]["company_currency_total"], 10)
+        self.assertEqual(result["loyalty_redemption"]["points"], 2)
+        self.assertEqual(result["loyalty_redemption"]["count"], 1)
+        self.assertEqual(result["payments_by_mode"][0]["company_currency_total"], 90)
+
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_payments_entries")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.get_pos_invoices")
+    @patch("posawesome.posawesome.doctype.pos_closing_shift.closing_processing.overview.frappe")
+    def test_overview_excludes_return_loyalty_adjustments_from_redeemed_totals(
+        self,
+        mock_frappe,
+        mock_get_pos_invoices,
+        mock_get_payments_entries,
+    ):
+        mock_frappe.get_doc.return_value = SimpleNamespace(
+            doctype="POS Opening Shift",
+            name="POS-OPEN-1",
+            pos_profile="POS-PROFILE-1",
+            company="My Co",
+        )
+        mock_frappe.get_cached_value.return_value = "USD"
+        mock_frappe.db.get_value.side_effect = lambda doctype, name, field: (
+            0
+            if (doctype, name, field)
+            == ("POS Profile", "POS-PROFILE-1", "create_pos_invoice_instead_of_sales_invoice")
+            else "Cash"
+        )
+        mock_get_pos_invoices.return_value = [
+            AttrDict(
+                {
+                    "name": "SINV-0001",
+                    "currency": "USD",
+                    "conversion_rate": 1,
+                    "grand_total": 100,
+                    "rounded_total": 100,
+                    "base_grand_total": 100,
+                    "loyalty_amount": 10,
+                    "base_loyalty_amount": 10,
+                    "loyalty_points": 2,
+                    "payments": [],
+                }
+            ),
+            AttrDict(
+                {
+                    "name": "SINV-RET-0001",
+                    "currency": "USD",
+                    "conversion_rate": 1,
+                    "is_return": 1,
+                    "grand_total": -40,
+                    "rounded_total": -40,
+                    "base_grand_total": -40,
+                    "loyalty_amount": -3,
+                    "base_loyalty_amount": -3,
+                    "loyalty_points": -1,
+                    "payments": [],
+                }
+            ),
+        ]
+        mock_get_payments_entries.return_value = []
+        mock_frappe.get_all.return_value = []
+
+        result = overview.get_closing_shift_overview("POS-OPEN-1")
+
+        self.assertEqual(result["loyalty_redemption"]["company_currency_total"], 10)
+        self.assertEqual(result["loyalty_redemption"]["points"], 2)
+        self.assertEqual(result["loyalty_redemption"]["count"], 1)
+        self.assertEqual(result["loyalty_redemption"]["by_currency"][0]["total"], 10)
+        self.assertEqual(result["loyalty_redemption"]["by_currency"][0]["points"], 2)
+        self.assertEqual(result["loyalty_redemption"]["by_currency"][0]["invoice_count"], 1)

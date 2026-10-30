@@ -1,4 +1,5 @@
 import renderOfflineInvoiceHTML from "../../offline_print_template";
+import { POS_BRAND_NAME } from "../config/branding";
 
 interface PrintDebugInfo {
 	printFormat?: string;
@@ -127,7 +128,7 @@ function showSessionMessage(targetWindow: Window | null | undefined) {
 			`<div style="font-family:sans-serif;padding:24px;line-height:1.5;">
 				<h2 style="margin:0 0 12px;">Print view unavailable</h2>
 				<p style="margin:0 0 12px;">${message}</p>
-				<p style="margin:0;">Once signed in, retry from POS Awesome.</p>
+				<p style="margin:0;">Once signed in, retry from ${POS_BRAND_NAME}.</p>
 			</div>`,
 		);
 		targetWindow.document.close();

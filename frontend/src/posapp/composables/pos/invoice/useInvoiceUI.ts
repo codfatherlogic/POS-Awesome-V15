@@ -1,10 +1,54 @@
-import { ref } from "vue";
+/**
+ * Invoice panel layout, resize persistence, and modal-confirmation helpers.
+ *
+ * **Resizable invoice panel**
+ * The invoice item list panel can be resized by the operator on large screens.
+ * `canResizeInvoicePanel()` returns `true` only when the viewport is at least
+ * 1280 × 860 px; below that threshold a viewport-fraction default is used instead.
+ * The clamped height is persisted in `localStorage` under the key
+ * `posawesome_invoice_height` and reloaded on the next session.
+ * The maximum height scales with viewport size: 58 % on very small screens,
+ * 64 % on medium, 72 % on large. A minimum of 320 px is enforced.
+ * The CSS custom property `--container-height` is used as the fallback default.
+ *
+ * **Payment confirmation dialog**
+ * `confirmPaymentSubmission()` opens `confirm_payment_dialog` and returns a
+ * `Promise<number | null>` that resolves when `resolvePaymentConfirmation(result)` is
+ * called by the dialog component. Closing the dialog directly (for example with
+ * Escape) resolves the pending confirmation as `null`. The resolver is stored
+ * in a closure-local variable and cleared after resolution to prevent
+ * double-resolve.
+ *
+ * **Drag feedback**
+ * `showDropFeedback(isDragging, target)` adds or removes the `drag-over` CSS
+ * class from the `.modern-items-table` element inside `target`, providing visual
+ * feedback during item drag-and-drop onto the cart.
+ */
+import { ref, watch } from "vue";
 
 export function useInvoiceUI() {
 	const invoiceHeight = ref<string | null>(null);
 	const confirm_payment_dialog = ref(false);
-	let payment_confirmation_resolver: ((_result: boolean) => void) | null =
-		null;
+	const payment_confirmation_amount = ref(0);
+	let payment_confirmation_resolver:
+		| ((_result: number | null) => void)
+		| null = null;
+
+	const settlePaymentConfirmation = (result: number | null) => {
+		const resolver = payment_confirmation_resolver;
+		payment_confirmation_resolver = null;
+		resolver?.(result);
+	};
+
+	watch(
+		confirm_payment_dialog,
+		(isOpen) => {
+			if (!isOpen) {
+				settlePaymentConfirmation(null);
+			}
+		},
+		{ flush: "sync" },
+	);
 
 	const getViewportHeight = () => {
 		if (typeof window === "undefined") {
@@ -69,7 +113,10 @@ export function useInvoiceUI() {
 		if (element) {
 			const defaultHeight = getDefaultInvoiceHeight();
 			if (!canResizeInvoicePanel()) {
-				invoiceHeight.value = clampInvoiceHeight(defaultHeight, defaultHeight);
+				invoiceHeight.value = clampInvoiceHeight(
+					defaultHeight,
+					defaultHeight,
+				);
 				return;
 			}
 			invoiceHeight.value = clampInvoiceHeight(
@@ -91,7 +138,10 @@ export function useInvoiceUI() {
 		const defaultHeight = getDefaultInvoiceHeight();
 		try {
 			if (!canResizeInvoicePanel()) {
-				invoiceHeight.value = clampInvoiceHeight(defaultHeight, defaultHeight);
+				invoiceHeight.value = clampInvoiceHeight(
+					defaultHeight,
+					defaultHeight,
+				);
 				return;
 			}
 			const saved = localStorage.getItem("posawesome_invoice_height");
@@ -99,26 +149,32 @@ export function useInvoiceUI() {
 				saved || defaultHeight,
 				defaultHeight,
 			);
-			localStorage.setItem("posawesome_invoice_height", invoiceHeight.value);
+			localStorage.setItem(
+				"posawesome_invoice_height",
+				invoiceHeight.value,
+			);
 		} catch (e) {
 			console.error("Failed to load invoice height:", e);
-			invoiceHeight.value = clampInvoiceHeight(defaultHeight, defaultHeight);
+			invoiceHeight.value = clampInvoiceHeight(
+				defaultHeight,
+				defaultHeight,
+			);
 		}
 	};
 
-	const confirmPaymentSubmission = () => {
+	const confirmPaymentSubmission = (initialAmount = 0) => {
+		payment_confirmation_amount.value = Math.abs(
+			Number(initialAmount) || 0,
+		);
 		confirm_payment_dialog.value = true;
-		return new Promise<boolean>((resolve) => {
+		return new Promise<number | null>((resolve) => {
 			payment_confirmation_resolver = resolve;
 		});
 	};
 
-	const resolvePaymentConfirmation = (result: boolean) => {
+	const resolvePaymentConfirmation = (result: number | null) => {
+		settlePaymentConfirmation(result);
 		confirm_payment_dialog.value = false;
-		if (payment_confirmation_resolver) {
-			payment_confirmation_resolver(result);
-			payment_confirmation_resolver = null;
-		}
 	};
 
 	const resolveElement = (target: any): Element | null => {
@@ -150,6 +206,7 @@ export function useInvoiceUI() {
 		saveInvoiceHeight,
 		loadInvoiceHeight,
 		confirm_payment_dialog,
+		payment_confirmation_amount,
 		confirmPaymentSubmission,
 		resolvePaymentConfirmation,
 		showDropFeedback,

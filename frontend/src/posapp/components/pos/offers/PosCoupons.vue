@@ -78,6 +78,7 @@ import { useCustomersStore } from "../../../stores/customersStore.js";
 import { useToastStore } from "../../../stores/toastStore.js";
 import { useUIStore } from "../../../stores/uiStore.js";
 import { storeToRefs } from "pinia";
+import { getCachedCoupons, saveCoupons } from "../../../../offline/index";
 
 export default {
 	setup() {
@@ -118,7 +119,9 @@ export default {
 		},
 		add_coupon(new_coupon, options = {}) {
 			const silentDuplicate = !!options.silentDuplicate;
-			const normalizedCoupon = String(new_coupon || "").trim().toUpperCase();
+			const normalizedCoupon = String(new_coupon || "")
+				.trim()
+				.toUpperCase();
 			if (!this.customer || !normalizedCoupon) {
 				this.toastStore.show({
 					title: __("Select a customer to use coupon"),
@@ -128,7 +131,10 @@ export default {
 			}
 			const coupons = this.posa_coupons || [];
 			const exist = coupons.find(
-				(el) => String(el.coupon_code || "").trim().toUpperCase() == normalizedCoupon,
+				(el) =>
+					String(el.coupon_code || "")
+						.trim()
+						.toUpperCase() == normalizedCoupon,
 			);
 			if (exist) {
 				if (!silentDuplicate) {
@@ -216,6 +222,35 @@ export default {
 			// update store
 			this.uiStore.setCouponCounts(this.couponsCount, this.appliedCouponsCount);
 		},
+		loadCachedCoupons(customer) {
+			const normalizedCustomer = String(customer || "").trim();
+			if (!normalizedCustomer) {
+				return [];
+			}
+			const cachedCoupons = getCachedCoupons();
+			const customerCoupons = cachedCoupons?.[normalizedCustomer];
+			if (!Array.isArray(customerCoupons)) {
+				return [];
+			}
+			return customerCoupons.map((coupon) => ({ ...(coupon || {}) }));
+		},
+		persistCouponsCache() {
+			const normalizedCustomer = String(this.customer || "").trim();
+			if (!normalizedCustomer) {
+				return;
+			}
+			const nextCache = {
+				...(getCachedCoupons() || {}),
+			};
+			if (Array.isArray(this.posa_coupons) && this.posa_coupons.length > 0) {
+				nextCache[normalizedCustomer] = this.posa_coupons.map((coupon) => ({
+					...(coupon || {}),
+				}));
+			} else {
+				delete nextCache[normalizedCustomer];
+			}
+			saveCoupons(nextCache);
+		},
 	},
 
 	watch: {
@@ -224,6 +259,7 @@ export default {
 			handler() {
 				this.updateInvoice();
 				this.updateCounters();
+				this.persistCouponsCache();
 			},
 		},
 		selectedCustomer(newCustomer, oldCustomer) {
@@ -245,6 +281,10 @@ export default {
 				if (to_remove.length) {
 					this.removeCoupon(to_remove);
 				}
+			}
+			const cachedCoupons = this.loadCachedCoupons(normalized);
+			if (cachedCoupons.length) {
+				this.posa_coupons = cachedCoupons;
 			}
 			this.setActiveGiftCoupons();
 		},

@@ -1,0 +1,101 @@
+{
+ "actions": [],
+ "creation": "2026-08-20 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "currency",
+  "invoice_currency",
+  "company_currency",
+  "original_amount",
+  "exchange_rate",
+  "invoice_amount",
+  "company_exchange_rate",
+  "base_amount",
+  "rate_date",
+  "rate_source"
+ ],
+ "fields": [
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Return Currency",
+   "options": "Currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "invoice_currency",
+   "fieldtype": "Link",
+   "label": "Invoice Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company_currency",
+   "fieldtype": "Link",
+   "label": "Company Currency",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "original_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Amount Returned",
+   "options": "invoice_currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "exchange_rate",
+   "fieldtype": "Float",
+   "label": "Rate to Invoice Currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "invoice_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Invoice Currency Equivalent",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company_exchange_rate",
+   "fieldtype": "Float",
+   "label": "Rate to Company Currency",
+   "reqd": 1
+  },
+  {
+   "fieldname": "base_amount",
+   "fieldtype": "Currency",
+   "label": "Company Currency Equivalent",
+   "options": "company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rate_date",
+   "fieldtype": "Date",
+   "label": "Rate Date"
+  },
+  {
+   "fieldname": "rate_source",
+   "fieldtype": "Select",
+   "label": "Rate Source",
+   "options": "same_currency\ncurrency_exchange\nmanual\noffline_cache\nderived_inverse"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-20 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POSAwesome",
+ "name": "POS Currency Change Return",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

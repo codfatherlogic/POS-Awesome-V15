@@ -1,5 +1,6 @@
 import qz from "qz-tray";
 import { ref } from "vue";
+import { useUIStore } from "../stores/uiStore";
 
 declare const frappe: any;
 
@@ -21,7 +22,9 @@ export interface QzPrintDocumentOptions extends QzPrintHtmlOptions {
 
 const PRINTER_STORAGE_KEY = "posa_qz_printer_name";
 const CERT_READY_STORAGE_KEY = "posa_qz_cert_ready";
+const MANUAL_DISCONNECT_STORAGE_KEY = "posa_qz_manual_disconnect";
 const DEFAULT_PRINT_FORMAT = "Standard";
+const PROFILE_PRINTER_FIELD = "posa_qz_printer_name";
 
 export const qzConnected = ref(false);
 export const qzConnecting = ref(false);
@@ -29,12 +32,18 @@ export const qzCertStatus = ref<QzCertStatus>("unknown");
 export const qzPrinters = ref<string[]>([]);
 export const selectedQzPrinter = ref(getSavedPrinterName());
 export const qzCertReady = ref(loadCertReady());
+export const qzReconnectPaused = ref(loadReconnectPaused());
 
 let securityInitialized = false;
 let cachedCertificate: string | null = null;
 let certificateProvided = false;
 let connectPromise: Promise<boolean> | null = null;
 let certificateChecked = false;
+
+function translate(text: string) {
+	const translator = (globalThis as any).__ || (globalThis as any).frappe?._;
+	return typeof translator === "function" ? translator(text) : text;
+}
 
 function extractMessage<T>(value: any): T {
 	if (value && typeof value === "object" && "message" in value) {
@@ -70,6 +79,14 @@ function loadCertReady() {
 	}
 }
 
+function loadReconnectPaused() {
+	try {
+		return localStorage.getItem(MANUAL_DISCONNECT_STORAGE_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+
 function saveCertReady(value: boolean) {
 	try {
 		if (value) {
@@ -80,6 +97,75 @@ function saveCertReady(value: boolean) {
 	} catch {
 		// ignore localStorage errors
 	}
+}
+
+function saveReconnectPaused(value: boolean) {
+	try {
+		if (value) {
+			localStorage.setItem(MANUAL_DISCONNECT_STORAGE_KEY, "1");
+		} else {
+			localStorage.removeItem(MANUAL_DISCONNECT_STORAGE_KEY);
+		}
+	} catch {
+		// ignore localStorage errors
+	}
+}
+
+function setReconnectPaused(value: boolean) {
+	qzReconnectPaused.value = value;
+	saveReconnectPaused(value);
+}
+
+function getProfileDefaultPrinterName() {
+	try {
+		const uiStore = useUIStore();
+		const profile =
+			uiStore?.posProfile && typeof uiStore.posProfile === "object" && "value" in uiStore.posProfile
+				? uiStore.posProfile.value
+				: uiStore?.posProfile;
+
+		if (!profile || typeof profile !== "object") {
+			return "";
+		}
+
+		const value = profile[PROFILE_PRINTER_FIELD];
+		if (typeof value === "string" && value.trim()) {
+			return value.trim();
+		}
+	} catch {
+		// ignore store access issues outside app context
+	}
+
+	return "";
+}
+
+function setResolvedQzPrinter(name: string) {
+	selectedQzPrinter.value = name || "";
+}
+
+function resolvePreferredPrinter(printers: string[]) {
+	const saved = getSavedPrinterName();
+	if (saved && printers.includes(saved)) {
+		return saved;
+	}
+
+	const profileDefault = getProfileDefaultPrinterName();
+	if (profileDefault && printers.includes(profileDefault)) {
+		return profileDefault;
+	}
+
+	if (selectedQzPrinter.value && printers.includes(selectedQzPrinter.value)) {
+		return selectedQzPrinter.value;
+	}
+
+	return printers[0] || "";
+}
+
+export function resolveProfilePrinterName(profilePrinterName: string | undefined, printers: string[]): string {
+	if (profilePrinterName && printers.includes(profilePrinterName)) {
+		return profilePrinterName;
+	}
+	return resolvePreferredPrinter(printers);
 }
 
 function setupSecurity() {
@@ -160,14 +246,24 @@ export function savePrinterName(name: string) {
 }
 
 export function setSelectedQzPrinter(name: string) {
-	selectedQzPrinter.value = name || "";
+	setResolvedQzPrinter(name);
 	savePrinterName(name);
 }
 
-export async function connectQzTray(): Promise<boolean> {
+export async function connectQzTray(options: { userInitiated?: boolean } = {}): Promise<boolean> {
+	if (options.userInitiated) {
+		setReconnectPaused(false);
+	}
+
 	if (qz.websocket.isActive()) {
 		qzConnected.value = true;
 		return true;
+	}
+
+	if (qzReconnectPaused.value) {
+		qzConnected.value = false;
+		qzConnecting.value = false;
+		return false;
 	}
 
 	if (connectPromise) {
@@ -205,9 +301,14 @@ export async function connectQzTray(): Promise<boolean> {
 	}
 }
 
-export async function disconnectQzTray() {
+export async function disconnectQzTray(options: { manual?: boolean } = {}) {
+	if (options.manual !== false) {
+		setReconnectPaused(true);
+	}
+
 	if (!qz.websocket.isActive()) {
 		qzConnected.value = false;
+		qzConnecting.value = false;
 		return;
 	}
 
@@ -217,14 +318,20 @@ export async function disconnectQzTray() {
 		console.warn("Unable to disconnect from QZ Tray", error);
 	} finally {
 		qzConnected.value = false;
+		qzConnecting.value = false;
 	}
 }
 
 export async function findQzPrinters(): Promise<string[]> {
 	if (!qz.websocket.isActive()) {
+		if (qzReconnectPaused.value) {
+			qzConnected.value = false;
+			return qzPrinters.value;
+		}
+
 		const connected = await connectQzTray();
 		if (!connected) {
-			return [];
+			return qzPrinters.value;
 		}
 	}
 
@@ -237,20 +344,7 @@ export async function findQzPrinters(): Promise<string[]> {
 				: [];
 
 		qzPrinters.value = printers;
-		const saved = getSavedPrinterName();
-
-		if (saved && printers.includes(saved)) {
-			setSelectedQzPrinter(saved);
-		} else if (selectedQzPrinter.value && printers.includes(selectedQzPrinter.value)) {
-			setSelectedQzPrinter(selectedQzPrinter.value);
-		} else if (printers.length > 0) {
-			const firstPrinter = printers[0];
-			if (firstPrinter) {
-				setSelectedQzPrinter(firstPrinter);
-			}
-		} else {
-			setSelectedQzPrinter("");
-		}
+		setResolvedQzPrinter(resolvePreferredPrinter(printers));
 
 		return printers;
 	} catch (error) {
@@ -301,7 +395,7 @@ export async function getQzCertificateDownload() {
 		"posawesome.posawesome.api.qz.get_certificate_download",
 	);
 	if (!result?.pem) {
-		throw new Error("QZ certificate is not available.");
+		throw new Error(translate("QZ certificate is not available."));
 	}
 	qzCertReady.value = true;
 	saveCertReady(true);
@@ -315,29 +409,10 @@ export function getQzCertificateFilename(company?: string | null) {
 
 export async function printHtmlViaQz(html: string, options: QzPrintHtmlOptions = {}) {
 	if (!html) {
-		throw new Error("Nothing to print.");
+		throw new Error(translate("Nothing to print."));
 	}
 
-	if (!qz.websocket.isActive()) {
-		const connected = await connectQzTray();
-		if (!connected) {
-			throw new Error("QZ Tray is not available.");
-		}
-	}
-
-	let printer = options.printerName || selectedQzPrinter.value || getSavedPrinterName();
-	if (!printer) {
-		const printers = await findQzPrinters();
-		const firstPrinter = printers[0];
-		if (firstPrinter) {
-			printer = firstPrinter;
-			setSelectedQzPrinter(firstPrinter);
-		}
-	}
-
-	if (!printer) {
-		throw new Error("No QZ printer selected.");
-	}
+	const printer = await ensureQzPrinterReady(options.printerName);
 
 	const config = qz.configs.create(printer, {
 		size: {
@@ -363,9 +438,56 @@ export async function printHtmlViaQz(html: string, options: QzPrintHtmlOptions =
 	await qz.print(config, data);
 }
 
+export async function sendRawToQz(data: string, printerName?: string) {
+	const printer = await ensureQzPrinterReady(printerName);
+
+	const config = qz.configs.create(printer);
+	const printData = [
+		{
+			type: "raw",
+			format: "command",
+			flavor: "plain",
+			data: data,
+		},
+	];
+
+	await qz.print(config, printData);
+}
+
+async function ensureQzPrinterReady(printerName?: string) {
+	if (!qz.websocket.isActive()) {
+		const connected = await connectQzTray();
+		if (!connected) {
+			if (qzReconnectPaused.value) {
+				throw new Error(translate("QZ Tray is manually disconnected. Press Connect to enable it again."));
+			}
+			throw new Error(translate("QZ Tray is not available."));
+		}
+	}
+
+	let printer =
+		printerName ||
+		getSavedPrinterName() ||
+		getProfileDefaultPrinterName() ||
+		selectedQzPrinter.value;
+	if (!printer) {
+		const printers = await findQzPrinters();
+		if (printers[0]) {
+			printer = printers[0];
+			setResolvedQzPrinter(printers[0]);
+		}
+	}
+
+	if (!printer) {
+		throw new Error(translate("No QZ printer selected."));
+	}
+
+	return printer;
+}
+
 export async function printDocumentViaQz(options: QzPrintDocumentOptions) {
 	if (!options?.doctype || !options?.name) {
-		throw new Error("Invalid print document details.");
+		throw new Error(translate("Invalid print document details."));
 	}
 
 	const printFormat = options.printFormat || DEFAULT_PRINT_FORMAT;
@@ -387,7 +509,7 @@ export async function printDocumentViaQz(options: QzPrintDocumentOptions) {
 	const style = response?.style || response?.message?.style || "";
 
 	if (!html) {
-		throw new Error("Unable to load print HTML from server.");
+		throw new Error(translate("Unable to load print HTML from server."));
 	}
 
 	await printHtmlViaQz(buildPrintHtml(html, style), options);

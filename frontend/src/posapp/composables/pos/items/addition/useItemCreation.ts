@@ -1,3 +1,5 @@
+import { toCompanyCurrency } from "../../../../utils/erpnextCurrency";
+
 declare const __: (_text: string, _args?: any[]) => string;
 declare const frappe: any;
 
@@ -51,24 +53,17 @@ export function useItemCreation() {
 		const selectedCurrency = context.selected_currency || companyCurrency;
 		if (selectedCurrency !== companyCurrency) {
 			// Store original base currency values (Selected -> Company)
-			const conversionRate = context.conversion_rate || 1;
 			new_item.base_price_list_rate =
-				item.base_price_list_rate !== undefined
-					? item.base_price_list_rate
-					: item.rate * conversionRate;
+				item.base_price_list_rate ?? toCompanyCurrency(context, item.rate);
 			new_item.base_rate =
-				item.base_rate !== undefined
-					? item.base_rate
-					: item.rate * conversionRate;
+				item.base_rate ?? toCompanyCurrency(context, item.rate);
 			new_item.base_discount_amount = 0;
 		} else {
 			// In base currency, base rates = displayed rates
 			new_item.base_price_list_rate =
-				item.base_price_list_rate !== undefined
-					? item.base_price_list_rate
-					: item.rate;
+				item.base_price_list_rate ?? item.rate;
 			new_item.base_rate =
-				item.base_rate !== undefined ? item.base_rate : item.rate;
+				item.base_rate ?? item.rate;
 			new_item.base_discount_amount = 0;
 		}
 
@@ -100,22 +95,13 @@ export function useItemCreation() {
 		// Baseline for UOM recalculations (ensure CF is finalized first)
 		const initialCF = new_item.conversion_factor || 1;
 		new_item.original_base_rate =
-			new_item.base_rate !== undefined
+			new_item.base_rate != null
 				? new_item.base_rate / initialCF
 				: 0;
 		new_item.original_base_price_list_rate =
-			new_item.base_price_list_rate !== undefined
+			new_item.base_price_list_rate != null
 				? new_item.base_price_list_rate / initialCF
 				: new_item.original_base_rate;
-
-		console.log("[useItemCreation] getNewItem complete", {
-			item_code: new_item.item_code,
-			uom: new_item.uom,
-			cf: new_item.conversion_factor,
-			base_rate: new_item.base_rate,
-			orig_base: new_item.original_base_rate,
-			orig_base_pl: new_item.original_base_price_list_rate,
-		});
 
 		new_item.actual_batch_qty = "";
 		new_item.posa_offers = JSON.stringify([]);
@@ -226,25 +212,18 @@ export function useItemCreation() {
 			item.base_price_list_rate = base_rate;
 		}
 
-		// Set final quantity
+		// The selector quantity is authoritative for normal item clicks. Catalog
+		// rows can retain a string/previous `qty`; treating that as authoritative
+		// silently adds one unit and prevents min-qty Pricing Rules from qualifying.
+		// Embedded barcode quantities remain authoritative for scale/barcode flows.
 		const hasBarcodeQty = item._barcode_qty;
 
-		console.log("[useItemAddition] prepareItemForCart qty check", {
-			item_code: item.item_code,
-			initial_item_qty: item.qty,
-			requestedQty,
-			hasBarcodeQty,
-		});
-
-		if (!item.qty || (item.qty === 1 && !hasBarcodeQty)) {
+		if (!hasBarcodeQty) {
 			let qtyVal = requestedQty;
 			if (hide_qty_decimals) {
 				qtyVal = Math.trunc(qtyVal);
 			}
 			item.qty = qtyVal;
-			console.log("[useItemAddition] qty updated", {
-				item_qty: item.qty,
-			});
 		}
 
 		return item;

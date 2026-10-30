@@ -40,7 +40,7 @@
 							</v-col>
 							<v-col cols="6">
 								<v-text-field
-									label="City"
+									:label="__('City')"
 									density="compact"
 									color="primary"
 									class="pos-themed-input"
@@ -50,7 +50,7 @@
 							</v-col>
 							<v-col cols="6">
 								<v-text-field
-									label="State"
+									:label="__('State')"
 									density="compact"
 									class="pos-themed-input"
 									hide-details
@@ -82,6 +82,7 @@ export default {
 		addressDialog: false,
 		address: {},
 		customer: "",
+		openNewAddressHandler: null,
 	}),
 	computed: {},
 
@@ -103,7 +104,7 @@ export default {
 					if (!r.exc) {
 						vm.eventBus.emit("add_the_new_address", r.message);
 						vm.toastStore.show({
-							text: "Customer Address created successfully.",
+							text: __("Customer Address created successfully."),
 							color: "success",
 						});
 						vm.addressDialog = false;
@@ -115,10 +116,17 @@ export default {
 		},
 	},
 	created: function () {
-		this.eventBus.on("open_new_address", (data) => {
+		this.openNewAddressHandler = (data) => {
 			this.addressDialog = true;
 			this.customer = data;
-		});
+		};
+		this.eventBus.on("open_new_address", this.openNewAddressHandler);
+	},
+	beforeUnmount() {
+		if (this.openNewAddressHandler) {
+			this.eventBus.off("open_new_address", this.openNewAddressHandler);
+			this.openNewAddressHandler = null;
+		}
 	},
 };
 </script>

@@ -1,0 +1,57 @@
+{
+ "actions": [],
+ "creation": "2026-08-20 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "currency",
+  "allow_for_invoices",
+  "allow_for_payments",
+  "allow_for_change"
+ ],
+ "fields": [
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Currency",
+   "options": "Currency",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_for_invoices",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Invoices"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_for_payments",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Payments"
+  },
+  {
+   "default": "1",
+   "fieldname": "allow_for_change",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Change"
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-20 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "POSAwesome",
+ "name": "POS Allowed Currency",
+ "owner": "Administrator",
+ "permissions": [],
+ "quick_entry": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
+
