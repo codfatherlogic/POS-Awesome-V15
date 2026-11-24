@@ -7,7 +7,10 @@ import json
 import frappe
 from frappe.utils import nowdate, flt
 from frappe import _
-from erpnext.accounts.party import get_party_bank_account
+try:
+	from erpnext.accounts.party import get_party_bank_account
+except ImportError:
+	get_party_bank_account = None
 from erpnext.accounts.utils import reconcile_against_document
 from erpnext.accounts.doctype.payment_request.payment_request import (
     get_dummy_message,
